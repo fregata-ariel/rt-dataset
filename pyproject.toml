@@ -13,6 +13,7 @@ dependencies = [
     "pyyaml>=6.0",
     "click>=8.1.7",        # CLI構築用
     "sionna-rt",
+    "tensorflow>=2.21.0",
 ]
 
 [dependency-groups]
