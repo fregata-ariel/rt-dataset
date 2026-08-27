@@ -4,6 +4,14 @@ FROM ${BUILDER_IMAGE} AS builder
 
 FROM ${BASE_IMAGE}
 
+# 開発むけパッケージのインストール
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    wget \
+    ssh-client \
+    neovim
+
 # UID/GIDの管理 (ホストマシンのパーミッション問題回避)
 ARG USERNAME=vscode
 ARG USER_UID=1000
