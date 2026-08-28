@@ -29,9 +29,25 @@ angular_cfr[vertical_spatial_frequency,
             frequency_offset] : complex64
 ```
 
-This is intentionally called an angular *spectrum* rather than a calibrated
-AoA image. Mapping the FFT coordinates to a projection such as hemisphere or
-equirectangular is a later image-formation step.
+A CPU-only calibration then converts this matrix FFT into a physically oriented
+UE-local field:
+
+```text
+angular_cfr_calibrated[kz_over_k, ky_over_k, frequency_offset] : complex64
+```
+
+The calibration restores the phase origin to the aperture/UE center and corrects
+Sionna PlanarArray's row direction so +kz points toward local +z.
+
+Finally, an IFFT along the uniformly sampled frequency axis produces:
+
+```text
+angular_delay_cir[kz_over_k, ky_over_k, delay] : complex64
+```
+
+This angle-delay tensor is the first representation intended to behave like an
+RF image with delay bins as channels. The planar y-z aperture still has a
+front/back ambiguity in the sign of local kx.
 
 ## Run
 
@@ -42,7 +58,7 @@ git switch feature/1bs-1ue-rf-camera-mvp
 git pull
 ```
 
-The shortest smoke test uses the included mock scene:
+The shortest path-tracing smoke test uses the included mock scene:
 
 ```bash
 make rf-camera-mock
@@ -55,7 +71,20 @@ RF-camera view into:
 data/generated/mock_results/rf_camera/
 ```
 
-### Run the two stages manually
+Calibrate the angular field without re-running Sionna:
+
+```bash
+make rf-camera-calibrate-mock
+```
+
+Develop the calibrated CFR into the angle-delay volume, also without re-running
+Sionna:
+
+```bash
+make rf-camera-delay-mock
+```
+
+### Run the path-tracing stage manually
 
 This repository currently uses `PYTHONPATH=./src` for its CLI entry point.
 Build the included mock CityJSON scene:
@@ -95,6 +124,8 @@ For a high-fidelity comparison, replace `--synthetic-array` with
 
 ## Expected output
 
+After all three MVP stages:
+
 ```text
 rf_camera/
   aperture_cfr.npy
@@ -103,6 +134,19 @@ rf_camera/
   angular_phase_center.png
   path_gt.npz
   rf_camera_metadata.json
+
+  angular_cfr_calibrated.npy
+  angular_power_center_calibrated.png
+  angular_phase_center_calibrated.png
+  angular_calibration.json
+
+  angular_delay_cir.npy
+  delay_axis_s.npy
+  propagating_direction_mask.npy
+  angular_power_strongest_delay.png
+  delay_profile_los_direction.png
+  dominant_delay_map.png
+  angle_delay_report.json
 ```
 
 The expected Sionna CFR shape for the default MVP is:
@@ -116,28 +160,53 @@ The expected Sionna CFR shape for the default MVP is:
 The implementation fails loudly if Sionna returns a different shape. This is
 intentional for the first hardware/software validation pass.
 
-## What to share after the first run
+For the default 100 MHz / 64-bin frequency grid:
 
-Please keep the console output, especially these lines:
+- frequency spacing: 1.5625 MHz
+- delay resolution: 10 ns
+- unambiguous delay period: 640 ns
+
+The saved complex angle-delay target uses the rectangular sampled band as-is.
+No delay window is applied to the target; visualization sidelobes are therefore
+expected.
+
+## Validation targets
+
+The default mock geometry has a direct BS-to-UE path. The angular calibration
+reports the strongest center-frequency bin and compares its y-z projection with
+the geometric LoS source direction.
+
+The angle-delay stage also compares the nearest-LoS angular-bin delay profile
+with the geometric propagation delay. Quantization on the 10 ns delay grid is
+expected.
+
+The square spatial FFT contains samples outside the physical far-field
+projection disk. `propagating_direction_mask.npy` marks samples satisfying:
 
 ```text
-Paths.cfr shape=...
-aperture_cfr shape=...
-angular_cfr shape=...
+(ky/k)^2 + (kz/k)^2 <= 1
 ```
 
-If it fails, share the traceback and the `Paths.cfr shape` line if printed.
-If it succeeds, share `angular_power_center.png` and
-`angular_phase_center.png` as well. Those are the first visual checks for
-array ordering and coherent phase.
+The remaining sign of kx is not observable from a single planar aperture.
 
 ## Image-formation checks
 
-The reshape and spatial FFT helpers have small tests that do not trace a scene:
+All calibration and delay-development tests are CPU-only:
 
 ```bash
-PYTHONPATH=./src uv run pytest tests/test_rf_camera_imaging.py -q
+PYTHONPATH=./src uv run pytest \
+  tests/test_rf_camera_imaging.py \
+  tests/test_rf_camera_calibration.py \
+  tests/test_rf_camera_delay.py -q
 ```
+
+## Optical reference images
+
+A future dataset stage will optionally render a conventional optical
+ray-tracing reference for the same RF view/pose. This reference is intended for
+geometry/pose/material debugging and possible multi-modal experiments; it is
+not the RF training target. Pixel-level co-registration will be defined after
+the final RF projection is chosen.
 
 ## Current limitations
 
@@ -145,9 +214,9 @@ PYTHONPATH=./src uv run pytest tests/test_rf_camera_imaging.py -q
 - one active Tx port only; no RU beamforming yet
 - single V polarization
 - no receiver oscillator / CFO / phase-noise model
-- no calibrated AoA projection yet
-- no phase-valid mask for deep fades yet
+- direction-cosine angular grid only; no perspective/equirectangular RF projection yet
+- planar aperture has front/back ambiguity in local kx
 - diffuse reflection is disabled
 - Sionna synthetic-array accuracy is not yet characterized for this use case
-- the debug phase PNG includes phase in low-power pixels and should not be used
-  directly as a training target
+- calibrated phase visualization masks low-power pixels, but training-target masking/loss is not yet defined
+- rectangular frequency sampling produces delay sidelobes; alternative analysis windows are diagnostic-only for now
