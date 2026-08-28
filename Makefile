@@ -1,4 +1,4 @@
-.PHONY: build-mock sim-mock run-all-mock clean
+.PHONY: build-mock sim-mock render-mock view-mock run-all-mock clean
 
 # PYTHONPATHを設定
 PYTHON := PYTHONPATH=./src/ python
@@ -14,6 +14,12 @@ build-mock:
 
 sim-mock:
 	$(PYTHON) -m plateau_rt.cli.main simulate $(MOCK_XML) $(MOCK_MANI) $(MOCK_OUT)
+
+render-mock:
+	$(PYTHON) -m plateau_rt.cli.main render $(MOCK_OUT)
+
+view-mock:
+	$(PYTHON) -m plateau_rt.cli.main view $(MOCK_OUT)
 
 run-all-mock:
 	$(PYTHON) -m plateau_rt.cli.main run-all $(MOCK_JSON) $(MOCK_OUT)
