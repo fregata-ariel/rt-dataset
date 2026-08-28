@@ -35,17 +35,33 @@ equirectangular is a later image-formation step.
 
 ## Run
 
-Switch to the feature branch and update the environment as usual:
+Switch to the feature branch:
 
 ```bash
 git switch feature/1bs-1ue-rf-camera-mvp
 git pull
 ```
 
+The shortest smoke test uses the included mock scene:
+
+```bash
+make rf-camera-mock
+```
+
+This first builds `data/raw/mock_building.city.json`, then develops one
+RF-camera view into:
+
+```text
+data/generated/mock_results/rf_camera/
+```
+
+### Run the two stages manually
+
+This repository currently uses `PYTHONPATH=./src` for its CLI entry point.
 Build the included mock CityJSON scene:
 
 ```bash
-uv run python -m plateau_rt.cli.main build \
+PYTHONPATH=./src uv run python -m plateau_rt.cli.main build \
   data/raw/mock_building.city.json \
   data/generated/rf_camera_mvp
 ```
@@ -53,7 +69,7 @@ uv run python -m plateau_rt.cli.main build \
 Then develop one RF-camera view:
 
 ```bash
-uv run python -m plateau_rt.cli.main rf-camera \
+PYTHONPATH=./src uv run python -m plateau_rt.cli.main rf-camera \
   data/generated/rf_camera_mvp/mock_building.city.xml \
   data/generated/rf_camera_mvp/rf_camera
 ```
@@ -61,7 +77,7 @@ uv run python -m plateau_rt.cli.main rf-camera \
 Useful overrides:
 
 ```bash
-uv run python -m plateau_rt.cli.main rf-camera SCENE.xml OUT \
+PYTHONPATH=./src uv run python -m plateau_rt.cli.main rf-camera SCENE.xml OUT \
   --ue-position 0 0 1.5 \
   --ue-orientation 0 0 0 \
   --bs-position -50 -50 30 \
@@ -89,7 +105,7 @@ rf_camera/
   rf_camera_metadata.json
 ```
 
-The expected Sionna CFR shape for the MVP is:
+The expected Sionna CFR shape for the default MVP is:
 
 ```text
 [1, 64, 1, 1, 1, 64]
@@ -115,12 +131,12 @@ If it succeeds, share `angular_power_center.png` and
 `angular_phase_center.png` as well. Those are the first visual checks for
 array ordering and coherent phase.
 
-## CPU-only image-formation checks
+## Image-formation checks
 
 The reshape and spatial FFT helpers have small tests that do not trace a scene:
 
 ```bash
-uv run pytest tests/test_rf_camera_imaging.py -q
+PYTHONPATH=./src uv run pytest tests/test_rf_camera_imaging.py -q
 ```
 
 ## Current limitations
