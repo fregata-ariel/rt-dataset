@@ -38,12 +38,58 @@ def simulate_coverage(xml_file: Path, manifest_file: Path, output_dir: Path):
     result_path = simulator.run_coverage_simulation(output_dir)
     click.echo(click.style(f"Success! Coverage map generated at: {result_path}", fg="green"))
 
+@cli.command("render")
+@click.argument("input_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+def render_heatmaps(input_dir: Path):
+    """
+    シミュレーション結果(npy)から2Dヒートマップ画像群を生成します。
+    """
+    import numpy as np
+    from plateau_rt.adapters.sionna.renderer import CoverageRenderer
+
+    # coverage npy を探す
+    npy_files = list(input_dir.glob("*coverage*.npy"))
+    if not npy_files:
+        click.echo(click.style("Error: No coverage .npy file found.", fg="red"))
+        raise SystemExit(1)
+
+    path_gain = np.load(npy_files[0])
+    click.echo(f"Loaded {npy_files[0]} (shape={path_gain.shape})")
+
+    results = CoverageRenderer.render_all(input_dir, path_gain)
+    for name, path in results.items():
+        click.echo(click.style(f"  {name}: {path}", fg="green"))
+
+@cli.command("view")
+@click.argument("input_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--metric", default="path_gain_db", help="初期表示メトリクス")
+@click.option("--interactive/--no-interactive", default=True, help="インタラクティブモード")
+def view_data(input_dir: Path, metric: str, interactive: bool):
+    """
+    インタラクティブ・ビューアでシミュレーション結果を閲覧します。
+    デフォルトは強度(path_gain dB)表示。
+    """
+    import matplotlib
+    matplotlib.use('TkAgg')  # Interactive backend
+
+    from plateau_rt.application.viewer import DatasetViewer
+
+    viewer = DatasetViewer(input_dir)
+
+    if interactive:
+        click.echo("Starting interactive viewer... (close window to exit)")
+        viewer.interactive()
+    else:
+        viewer.show(metric)
+
 @cli.command("run-all")
 @click.argument("input_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.argument("output_dir", type=click.Path(file_okay=False, path_type=Path))
-def run_all(input_file: Path, output_dir: Path):
+@click.option("--num-rx", default=4, help="PathSolver用テスト受信点数")
+@click.option("--keep-intermediates", is_flag=True, help="中間ファイルを保持する")
+def run_all(input_file: Path, output_dir: Path, num_rx: int, keep_intermediates: bool):
     """
-    一気貫通: CityJSONのパースから電波シミュレーションまでを全自動で実行します。
+    一気貫通: CityJSONのパースから電波シミュレーション、画像生成までを全自動で実行します。
     """
     click.echo(click.style("=== Starting End-to-End Pipeline ===", fg="cyan"))
     
@@ -52,12 +98,18 @@ def run_all(input_file: Path, output_dir: Path):
     xml_path = builder.run()
     manifest_path = output_dir / "manifest.json"
     
-    # 2. シミュレーション実行
-    click.echo(click.style("=== Proceeding to Simulation ===", fg="cyan"))
+    # 2. フルシミュレーション実行 (カバレッジ + パス分解 + レンダリング)
+    click.echo(click.style("=== Proceeding to Full Simulation ===", fg="cyan"))
     simulator = SionnaSimulator(xml_path, manifest_path)
-    result_path = simulator.run_coverage_simulation(output_dir)
+    results = simulator.run_full_simulation(
+        output_dir,
+        num_rx=num_rx,
+        keep_intermediates=keep_intermediates,
+    )
     
-    click.echo(click.style(f"=== Pipeline Finished! Result: {result_path} ===", fg="green", bold=True))
+    click.echo(click.style("=== Pipeline Finished! ===", fg="green", bold=True))
+    for name, path in results.items():
+        click.echo(f"  {name}: {path}")
 
 if __name__ == "__main__":
     cli()
