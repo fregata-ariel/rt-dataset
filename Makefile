@@ -1,4 +1,4 @@
-.PHONY: build-mock sim-mock render-mock view-mock run-all-mock rf-camera-mock clean
+.PHONY: build-mock sim-mock render-mock view-mock run-all-mock rf-camera-mock rf-camera-calibrate-mock clean
 
 # PYTHONPATHを設定
 PYTHON := PYTHONPATH=./src/ python
@@ -27,6 +27,9 @@ run-all-mock:
 
 rf-camera-mock: build-mock
 	$(PYTHON) -m plateau_rt.cli.main rf-camera $(MOCK_XML) $(RF_CAMERA_OUT)
+
+rf-camera-calibrate-mock:
+	$(PYTHON) -m plateau_rt.adapters.sionna.rf_camera_calibration $(RF_CAMERA_OUT)
 
 clean:
 	rm -rf data/intermediate/* data/generated/*
