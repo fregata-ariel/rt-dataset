@@ -1,4 +1,4 @@
-.PHONY: build-mock sim-mock render-mock view-mock run-all-mock rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock clean
+.PHONY: build-mock sim-mock render-mock view-mock run-all-mock rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock rf-camera-multiview-mock clean
 
 # PYTHONPATHを設定
 PYTHON := PYTHONPATH=./src/ python
@@ -9,6 +9,7 @@ MOCK_OUT  := data/generated/mock_results/
 MOCK_XML  := $(MOCK_OUT)/mock_building.city.xml
 MOCK_MANI := $(MOCK_OUT)/manifest.json
 RF_CAMERA_OUT := $(MOCK_OUT)/rf_camera/
+RF_CAMERA_MULTIVIEW_OUT := $(MOCK_OUT)/rf_camera_multiview/
 
 build-mock:
 	$(PYTHON) -m plateau_rt.cli.main build $(MOCK_JSON) $(MOCK_OUT)
@@ -33,6 +34,10 @@ rf-camera-calibrate-mock:
 
 rf-camera-delay-mock:
 	$(PYTHON) -m plateau_rt.adapters.sionna.rf_camera_delay $(RF_CAMERA_OUT)
+
+rf-camera-multiview-mock: build-mock
+	$(PYTHON) -m plateau_rt.adapters.sionna.rf_camera_dataset $(MOCK_XML) $(RF_CAMERA_MULTIVIEW_OUT) \
+		--num-views 8 --radius-m 30 --ue-height-m 1.5 --target 5 5 5
 
 clean:
 	rm -rf data/intermediate/* data/generated/*
