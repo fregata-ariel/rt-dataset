@@ -16,8 +16,8 @@ git tag milestone/1bs-multiue-rf-camera-dataset
 git push origin milestone/1bs-multiue-rf-camera-dataset
 ```
 
-または Actions タブから `Milestone heavy CI (GPU)` を手動実行します
-(手動実行は、ワークフローがデフォルトブランチ `sionna-rt` に入ってから使えます)。
+または Actions タブ / `gh workflow run milestone-heavy.yml --ref <branch>` で
+`Milestone heavy CI (GPU)` を手動実行します。
 
 生成されたモックデータセット (`mock_results/`) と JUnit XML は、
 `milestone-heavy-reports` アーティファクトとして 30 日間保存されます。

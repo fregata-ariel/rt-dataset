@@ -51,13 +51,6 @@ front/back ambiguity in the sign of local kx.
 
 ## Run
 
-Switch to the feature branch:
-
-```bash
-git switch feature/1bs-1ue-rf-camera-mvp
-git pull
-```
-
 The shortest path-tracing smoke test uses the included mock scene:
 
 ```bash

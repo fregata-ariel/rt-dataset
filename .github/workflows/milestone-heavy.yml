@@ -1,7 +1,6 @@
 # 節目 (マイルストーン) に回す重いGPU検証。
 #   - タグ push:  v*  または  milestone/*   (例: git tag milestone/1bs-multiue && git push origin milestone/1bs-multiue)
 #   - 手動実行:   Actions タブ または  gh workflow run milestone-heavy.yml --ref <branch>
-#                 (手動実行はワークフローがデフォルトブランチに入ってから有効)
 #
 # 内容は scripts/ci/run-heavy.sh を参照。生成されたモックデータセットとテスト結果を成果物として保存する。
 name: Milestone heavy CI (GPU)
