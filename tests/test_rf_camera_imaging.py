@@ -1,16 +1,47 @@
 import numpy as np
+import pytest
 
 from plateau_rt.domain.rf_camera.imaging import (
     aperture_to_angular_fft,
     frequency_offsets,
     reshape_planar_column_first,
     split_pattern_axis,
+    uniform_frequency_spacing,
 )
 
 
 def test_frequency_offsets_are_centered_on_dc():
     offsets = frequency_offsets(100e6, 4)
     np.testing.assert_allclose(offsets, [-50e6, -25e6, 0.0, 25e6])
+
+
+@pytest.mark.parametrize("bandwidth_hz", [50e6, 100e6, 200e6, 400e6])
+@pytest.mark.parametrize("num_bins", [16, 63, 64, 65, 96, 127, 128, 256, 512, 1024])
+def test_uniform_frequency_spacing_recovers_float32_grid_spacing(bandwidth_hz, num_bins):
+    offsets = frequency_offsets(bandwidth_hz, num_bins)
+
+    delta_f = uniform_frequency_spacing(offsets)
+
+    assert delta_f == pytest.approx(bandwidth_hz / num_bins, rel=1e-6)
+
+
+def test_uniform_frequency_spacing_rejects_moved_bin():
+    offsets = frequency_offsets(400e6, 512).copy()
+    spacing = 400e6 / 512
+    offsets[10] = np.float32(offsets[10] + np.float32(0.01 * spacing))
+
+    with pytest.raises(ValueError, match="uniformly spaced"):
+        uniform_frequency_spacing(offsets)
+
+
+def test_uniform_frequency_spacing_rejects_non_increasing_grid():
+    with pytest.raises(ValueError, match="distinct increasing"):
+        uniform_frequency_spacing(np.array([-1.0, 0.0, 0.0, 1.0]))
+
+
+def test_uniform_frequency_spacing_rejects_single_bin():
+    with pytest.raises(ValueError):
+        uniform_frequency_spacing(np.array([0.0]))
 
 
 def test_planar_array_column_first_numbering_is_restored():

@@ -15,6 +15,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from plateau_rt.domain.rf_camera.imaging import uniform_frequency_spacing
+
 SPEED_OF_LIGHT_M_S = 299_792_458.0
 
 
@@ -58,12 +60,7 @@ def angular_cfr_to_delay(
     frequencies = frequencies[order]
     cfr = cfr[..., order]
 
-    differences = np.diff(frequencies)
-    delta_f = float(np.median(differences))
-    if delta_f <= 0.0:
-        raise ValueError("frequency offsets must contain distinct increasing bins")
-    if not np.allclose(differences, delta_f, rtol=1e-6, atol=max(1e-3, abs(delta_f) * 1e-9)):
-        raise ValueError("frequency offsets must be uniformly spaced")
+    delta_f = uniform_frequency_spacing(frequencies)
 
     # The stored frequency axis is centered as [-B/2, ..., 0, ..., +B/2).
     # Move DC to index zero before using NumPy's inverse DFT convention.

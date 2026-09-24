@@ -23,6 +23,48 @@ def frequency_offsets(bandwidth_hz: float, num_bins: int) -> np.ndarray:
     return (indices * spacing).astype(np.float32)
 
 
+def uniform_frequency_spacing(frequency_offsets_hz: np.ndarray) -> float:
+    """Return the grid spacing ``delta_f`` of a strictly increasing offset axis.
+
+    ``frequency_offsets_hz`` must be a 1-D, finite, strictly increasing array
+    with at least two bins; :func:`delay.angular_cfr_to_delay` sorts its axis
+    before calling this helper.
+
+    ``delta_f`` is taken as the exact endpoint slope ``(f[-1] - f[0]) / (N - 1)``
+    in float64. That is more accurate than a median of quantised differences and
+    is the value reproduced by a uniform grid.
+
+    The uniformity tolerance includes a float32 term because the offsets are
+    stored as float32: they are exactly the grid passed to Sionna's
+    ``Paths.cfr``, so the sampled CFR is evaluated on that quantised grid. Above
+    ``2**24`` Hz the float32 ulp reaches a few Hz and the endpoint slope can no
+    longer be matched to better than ``4 * spacing(max |f|)``; a genuinely
+    non-uniform grid still exceeds this tolerance.
+    """
+    frequencies = np.asarray(frequency_offsets_hz, dtype=np.float64)
+    if frequencies.ndim != 1:
+        raise ValueError("frequency offsets must be one-dimensional")
+    if frequencies.size < 2:
+        raise ValueError("at least two frequency bins are required")
+    if not np.all(np.isfinite(frequencies)):
+        raise ValueError("frequency offsets must be finite")
+    if np.any(np.diff(frequencies) <= 0.0):
+        raise ValueError("frequency offsets must contain distinct increasing bins")
+
+    delta_f = float((frequencies[-1] - frequencies[0]) / (frequencies.size - 1))
+
+    max_abs = np.max(np.abs(frequencies))
+    tolerance = max(
+        1e-3,
+        1e-6 * abs(delta_f),
+        4.0 * float(np.spacing(np.float32(max_abs))),
+    )
+    expected = frequencies[0] + np.arange(frequencies.size, dtype=np.float64) * delta_f
+    if np.any(np.abs(frequencies - expected) > tolerance):
+        raise ValueError("frequency offsets must be uniformly spaced")
+    return delta_f
+
+
 def reshape_planar_column_first(
     aperture_flat: np.ndarray,
     *,

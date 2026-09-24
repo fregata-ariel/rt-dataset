@@ -7,6 +7,7 @@ from plateau_rt.domain.rf_camera.delay import (
     dominant_delay,
     propagating_direction_mask,
 )
+from plateau_rt.domain.rf_camera.imaging import frequency_offsets
 
 
 def test_angle_delay_ifft_recovers_exact_delay_bin():
@@ -14,6 +15,29 @@ def test_angle_delay_ifft_recovers_exact_delay_bin():
     bandwidth_hz = 100e6
     delta_f = bandwidth_hz / num_bins
     frequencies = (np.arange(num_bins) - num_bins // 2) * delta_f
+
+    expected_bin = 25
+    expected_delay = expected_bin / bandwidth_hz
+    cfr_1d = np.exp(-1j * 2.0 * np.pi * frequencies * expected_delay)
+    cfr = np.broadcast_to(cfr_1d, (3, 4, num_bins)).copy()
+
+    volume = angular_cfr_to_delay(cfr, frequencies)
+
+    peak_bins = np.argmax(np.abs(volume.cir), axis=-1)
+    np.testing.assert_array_equal(peak_bins, np.full((3, 4), expected_bin))
+    assert volume.delay_s[expected_bin] == pytest.approx(expected_delay)
+    assert volume.frequency_spacing_hz == pytest.approx(delta_f)
+    assert volume.unambiguous_delay_s == pytest.approx(1.0 / delta_f)
+    np.testing.assert_allclose(np.abs(volume.cir[:, :, expected_bin]), 1.0, atol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("bandwidth_hz", "num_bins"),
+    [(100e6, 128), (400e6, 512)],
+)
+def test_angle_delay_recovers_exact_bin_on_float32_grid(bandwidth_hz, num_bins):
+    frequencies = frequency_offsets(bandwidth_hz, num_bins)
+    delta_f = bandwidth_hz / num_bins
 
     expected_bin = 25
     expected_delay = expected_bin / bandwidth_hz
