@@ -37,7 +37,7 @@ docker compose build
 |---|---|---|
 | `plateau-sionna-base` | 土台 | CUDA base (Ubuntu 24.04) + OS ライブラリ + uv + Python 3.12 |
 | `plateau-sionna` | 本番・CI | base + `uv.lock` 通りの依存 (test グループ含む) + `src/` |
-| `plateau-sionna-dev` | Devcontainer | 本番 + jupyter / ty / git / sudo |
+| `plateau-sionna-dev` | Devcontainer | 本番と同じ依存 + jupyter / ty / git / sudo |
 
 3つとも `docker/Dockerfile` のマルチステージから作られ、非 root ユーザー `app` (UID 1000)
 で動きます。Python 依存は `/opt/venv` に入っており、バージョンは `uv.lock` と

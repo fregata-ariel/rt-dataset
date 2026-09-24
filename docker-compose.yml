@@ -1,7 +1,7 @@
 # イメージは docker/Dockerfile のマルチステージから3つだけ作る:
 #   base : ${IMAGE_PREFIX}-base  CUDA base + OS ライブラリ + uv + Python
 #   prod : ${IMAGE_PREFIX}       本番 (uv.lock 通りの依存 + test ツール + src)。CI もこれを使う
-#   dev  : ${IMAGE_PREFIX}-dev   Devcontainer 用 (prod + 開発ツール)
+#   dev  : ${IMAGE_PREFIX}-dev   Devcontainer 用 (prod と同じ依存 + 開発ツール + src)
 #
 # IMAGE_PREFIX: イメージ名の接頭辞 (既定: plateau-sionna)。
 #   CI は別の接頭辞を使い、開発者のイメージタグを上書きしない。
