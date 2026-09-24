@@ -1,160 +1,129 @@
-# 開発環境テンプレート (`Dev Env Template`)
+# PLATEAU × Sionna-RT RF カメラデータセット生成
 
-これは、DockerとVS Code Dev Containersを利用した、標準的な開発環境を迅速に構築するためのテンプレートリポジトリです。
+PLATEAU の 3D 都市モデル (CityJSON) から Sionna-RT のシーンを生成し、電波伝搬
+シミュレーションによって次のデータを作るツール群です。
 
-このテンプレートの目的は、「開発環境の定義」と「アプリケーションのソースコード」を分離することです。これにより、どんなアプリケーションを開発する場合でも、チームメンバー全員が全く同じクリーンな環境で開発を始めることができます。
+- **カバレッジ**: 2D パスゲインマップと 3D レンダリング
+- **RF カメラ**: UE の平面受信開口で観測した複素 CFR と、それを現像した
+  角度 / 角度-遅延画像
+  - 1 BS / 1 UE の MVP と、その物理校正・角度-遅延展開
+  - 1 BS / multi-UE のマルチビューデータセット (Gaussian Splatting 用カメラモデル付き)
 
-## 🎯 特徴
-
-  * **環境の統一**: `Dockerfile`で定義されたOSとツール群により、開発者全員が同じ環境を利用できます。これにより「私の環境では動くのに…」といった問題を撲滅します。
-  * **ホストOSの汚染防止**: 開発に必要なツール群はすべてコンテナ内に閉じ込められるため、ローカルマシンをクリーンに保てます。
-  * **迅速なセットアップ**: 新しいメンバーや新しいPCでも、いくつかのコマンドを実行するだけで、数分で開発環境が整います。
-  * **柔軟な設定**: `project.env`ファイルを変更するだけで、開発対象のアプリケーションを簡単に切り替えることができます。
-
------
-
-## ✍️ 事前準備
-
-このテンプレートを利用する前に、お使いのローカルマシンに以下のツールがインストールされていることを確認してください。
-
-  * [Git](https://git-scm.com/)
-  * [Visual Studio Code](https://code.visualstudio.com/)
-  * [Dev Containers](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) (VS Code拡張機能)
-  * [Docker Desktop](https://www.docker.com/products/docker-desktop/) または互換性のあるコンテナランタイム
-
------
-
-## 🚀 利用手順
-
-以下の手順に従って、新しいプロジェクトのための開発環境を構築します。
-
-### Step 1: このテンプレートから新しいリポジトリを作成する
-
-まず、このリポジトリを元にして、あなたのプロジェクト管理用の新しいリポジトリを作成します。
-
-1.  このページの右上にある緑色の **"Use this template"** ボタンをクリックし、**"Create a new repository"** を選択します。
-2.  新しいリポジトリの名前（例: `my-project-dev-env`）などを設定し、リポジトリを作成します。
-
-> **Note**
-> このテンプレートを直接`fork`するのではなく、**"Use this template"** を利用してください。これにより、クリーンな履歴で新しいプロジェクトを開始できます。
-
-### Step 2: 新しく作成したリポジトリをクローンする
-
-サブモジュール（Sionna-RT）を含めてローカルマシンにクローンします。
-
-```bash
-# "your-account"と"your-new-repository"をあなたのものに置き換えてください
-git clone --recursive git@github.com:your-account/your-new-repository.git
-
-# クローンしたディレクトリに移動
-cd your-new-repository
+```text
+CityJSON ──build──▶ PLY + Mitsuba XML + manifest.json
+                      │
+                      ├─ simulate / run-all ──▶ カバレッジ (npy, PNG, 3D render)
+                      │
+                      ├─ rf-camera ──▶ aperture_cfr ─ rf-camera-calibrate ─▶ 校正済み角度画像
+                      │                                └ rf-camera-delay ───▶ 角度-遅延ボリューム
+                      │
+                      └─ rf-camera-multiview ──▶ views/*/rf/ + camera_model.npz + dataset_manifest.json
 ```
 
-> **Note**
-> すでに通常クローンしている場合は、以下のコマンドでサブモジュールを初期化してください。
-> ```bash
-> git submodule update --init --recursive
-> ```
+## 環境構築
 
-### Step 3: 環境設定ファイル（.env）を作成・編集する
-
-`.env.example` をコピーして `.env` を作成し、マシンのGPU環境に合わせて設定します。
+GPU (NVIDIA) と Docker / NVIDIA Container Toolkit を前提に、Docker イメージ上で開発・実行します。
 
 ```bash
+# サブモジュール (third_party/sionna-rt) を含めて取得
+git clone --recursive git@github.com:fregata-ariel/rt-dataset.git
+cd rt-dataset
+
+# GPU の Compute Capability を設定 (例: RTX 2080 Ti = 75, RTX 4090 = 89)
 cp .env.example .env
-```
 
-**`.env`**
-```bash
-# お使いのGPUのCompute Capability (例: 1660Ti=75, RTX 3080/3090=86, RTX 4090=89, A100=80)
-CUDA_ARCH=75
-
-# 利用するベースCUDAイメージ
-CUDA_IMAGE=nvidia/cuda:12.1.1-devel-ubuntu22.04
-```
-
-### Step 4: プロジェクト設定ファイル（project.env）を作成・編集する
-
-`project.env.example` をコピーして `project.env` を作成し、開発対象のアプリケーション情報を設定します。
-
-```bash
-cp project.env.example project.env
-```
-
-**`project.env`**
-
-```bash
-# 必須：開発対象のアプリケーションリポジトリのSSH URL
-APP_REPO_URL=git@github.com:your-org/your-application.git
-
-# 任意：コンテナ内でのGitコミットに利用する名前とメールアドレス
-GIT_USER_NAME="Your Name"
-GIT_USER_EMAIL="your_email@example.com"
-```
-
-### Step 5: SSHキーの準備
-
-コンテナ内から`git clone`を行うために、SSHキーが必要です。
-
-1.  ホストマシン（あなたのPC）にSSHキーペア（`~/.ssh/id_ed25519`など）が設定されていることを確認してください。
-2.  そのキーペアの**公開鍵** (`~/.ssh/id_ed25519.pub`) を、GitHubやその他のGitホスティングサービスに登録しておいてください。
-
-### Step 6: ベース・ビルダーイメージを事前にビルドする
-
-Devcontainerが参照するベースイメージおよびSionna-RTのコンパイル済みビルダーイメージをビルドします。
-
-```bash
-# 1. 共通ベースイメージのビルド
+# ベースイメージと Sionna-RT の Wheel ビルダーを作成
 docker compose build base
-
-# 2. Sionna-RTのコンパイルとWheel生成ビルダーのビルド
 docker compose build builder
 ```
 
-### Step 7: 開発環境を起動する
+その後 VS Code で「Dev Containers: Reopen in Container」を実行すると、
+`.devcontainer/` の開発環境 (依存関係は `uv sync --dev` で導入) が起動します。
 
-いよいよ開発環境を起動します。
+## 使い方
 
-1.  VS Codeで、Step 2でクローンした**ひな形リポジトリのフォルダ**（`your-new-repository`）を開きます。
-2.  VS Codeの右下に「**Reopen in Container**」というポップアップが表示されたら、そのボタンをクリックします。
-      * 表示されない場合は、コマンドパレット（`Ctrl+Shift+P` または `Cmd+Shift+P`）を開き、「**Dev Containers: Reopen in Container**」を検索して実行します。
-3.  初回起動時は、Dockerイメージのビルドと`post-create.sh`スクリプトの実行に数分かかります。
+コマンドは `src/` を `PYTHONPATH` に通して実行します (Makefile が設定済み)。
 
-処理が完了すると、VS Codeのウィンドウがリロードされ、ターミナルが開きます。エクスプローラーには、`project.env`で指定したアプリケーションのソースコードが表示されているはずです。
+### モックデータでの実行
 
-これで、開発を始める準備が整いました！ 🎉
+`data/raw/mock_building.city.json` (10 m 立方の建物1棟) で各段階を試せます。
+出力先は `data/generated/mock_results/` です。
 
------
+| ターゲット | 内容 |
+|---|---|
+| `make build-mock` | CityJSON → PLY / Mitsuba XML / manifest.json |
+| `make sim-mock` / `make render-mock` | カバレッジ計算 / 2D ヒートマップ画像 |
+| `make run-all-mock` | build + カバレッジ + パス分解 + 3D レンダリング |
+| `make view-mock` | 結果のインタラクティブビューア (要ディスプレイ) |
+| `make rf-camera-mock` | 1 BS / 1 UE の RF カメラ画像 |
+| `make rf-camera-calibrate-mock` | 角度画像の物理校正 (GPU 不要) |
+| `make rf-camera-delay-mock` | 角度-遅延ボリュームへの展開 (GPU 不要) |
+| `make rf-camera-multiview-mock` | 1 BS / 8 UE のマルチビューデータセット |
+| `make clean` | 生成物の削除 |
 
-## 🧪 インフラの統合テスト (CI / 検証)
-
-本テンプレートでビルドされる `runtime` イメージが、Sionna-RT を正しくインストールし実行可能であるかを検証するためのテストスクリプトが用意されています。
+### CLI
 
 ```bash
-# base -> builder -> runtime をビルドし、Sionna-RTのユニットテストを実行
-./scripts/run-infra-test.sh
+PYTHONPATH=./src python -m plateau_rt.cli.main --help
 ```
 
-このテストは以下を検証します:
-1. `Dockerfile.base`, `Dockerfile.builder`, `Dockerfile.runtime` のビルドが成功すること
-2. Sionna-RT のコンパイル済み Wheel が `runtime` イメージに正しくインストールされること
-3. Sionna-RT の数値計算・コアロジックのユニットテスト（30件以上）が正常にパスすること
+| コマンド | 内容 |
+|---|---|
+| `build INPUT OUTPUT_DIR` | CityJSON から Sionna-RT シーンを生成 |
+| `simulate XML MANIFEST OUTPUT_DIR` | カバレッジマップを計算 |
+| `run-all INPUT OUTPUT_DIR` | build からレンダリングまで一気通貫 |
+| `render DIR` / `view DIR` | ヒートマップ画像の生成 / ビューア |
+| `rf-camera XML OUTPUT_DIR` | 1 BS / 1 UE の RF カメラ画像 |
+| `rf-camera-calibrate DIR` | `rf-camera` の出力を物理座標に校正 |
+| `rf-camera-delay DIR` | 校正済み出力を角度-遅延ボリュームに展開 |
+| `rf-camera-multiview XML OUTPUT_DIR` | リング配置の multi-UE データセット |
 
-GitHub Actions（GPUノード上のセルフホストランナー）による単体テストと、節目に回す重いGPU検証については [docs/ci.md](docs/ci.md) を参照してください。
+各オプションは `--help` を参照してください。RF カメラの観測モデル・座標系・出力形式は
+次のドキュメントにまとめています。
 
------
+- [docs/rf_camera_mvp.md](docs/rf_camera_mvp.md): 1 BS / 1 UE、校正、角度-遅延
+- [docs/rf_camera_multiview.md](docs/rf_camera_multiview.md): マルチビューデータセットとカメラモデル
 
-## 🔧 環境のカスタマイズ
+## コード構成
 
-この環境をさらにカスタマイズしたい場合は、以下のファイルを編集してください。
+```text
+src/plateau_rt/
+  domain/
+    models.py              建物・面・シーンのドメインモデル
+    rf_camera/             RF カメラの数式と座標系 (NumPy のみ・Sionna 非依存)
+      imaging.py             周波数グリッド、PlanarArray の並べ替え、空間 FFT
+      calibration.py         角度画像の物理校正、方向余弦軸、回転、LoS 方向
+      delay.py               角度-遅延 IFFT、伝搬可能方向マスク、支配遅延
+      camera.py              視点 (リング配置・look-at) と方向余弦カメラモデル
+  application/
+    build_scene.py         CityJSON → シーン生成パイプライン
+    rf_camera_calibration.py, rf_camera_delay.py
+                           RF カメラ出力ディレクトリの後処理 (GPU 不要)
+    viewer.py              カバレッジ結果ビューア
+  adapters/
+    plateau/               CityJSON パーサ
+    geometry/              trimesh による PLY 生成
+    sionna/                Sionna-RT 連携 (シーン XML、カバレッジ、RF カメラのトレース)
+      rf_tracing.py          RF カメラ共通: アレイ設定、PathSolver、開口 CFR 抽出
+      rf_camera.py           1 BS / 1 UE MVP
+      rf_camera_dataset.py   1 BS / multi-UE データセット
+    plotting/              RF カメラ診断画像 (matplotlib)
+  cli/main.py              click CLI
+```
 
-  * **ツールの追加・変更**: `Dockerfile`を編集し、`apt-get install`の行に必要なパッケージを追加したり、バージョンを変更したりします。
-  * **VS Codeの拡張機能や設定の変更**: `.devcontainer/devcontainer.json`を編集し、推奨する拡張機能を追加したり、コンテナのメモリ割り当てを変更したりできます。
+`domain/rf_camera` と後処理は Sionna を import しないことをテスト
+(`tests/test_rf_camera_boundaries.py`) で保証しています。
 
-ファイルを編集した後は、コマンドパレットから「**Dev Containers: Rebuild Container**」を実行して変更を適用してください。
+## テストと CI
 
------
+```bash
+scripts/ci/run-lint.sh        # ruff check / format --check
+scripts/ci/run-unit-tests.sh  # tests/ (GPU・Sionna 不要)
+scripts/ci/run-heavy.sh       # Sionna-RT テスト + モック E2E + 生成物検証 (GPU)
+```
 
-## oc_ha ブランチ
+GitHub Actions のセルフホストランナー (GPU ノード) で、push ごとの単体テストと、
+`v*` / `milestone/*` タグで起動する重い GPU 検証を回しています。
+詳細は [docs/ci.md](docs/ci.md) を参照してください。
 
-OpenCodeとHermes Agentが有効化された開発環境のテンプレートです。
+Docker イメージ (base → builder → runtime) 自体の検証は `scripts/run-infra-test.sh` で行えます。
