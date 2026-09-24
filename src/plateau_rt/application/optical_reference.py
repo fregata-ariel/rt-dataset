@@ -24,6 +24,10 @@ from typing import Any
 
 import numpy as np
 
+from plateau_rt.application.rf_dataset_manifest import (
+    RFDatasetManifest,
+    load_rf_dataset_manifest,
+)
 from plateau_rt.domain.rf_camera.optical import (
     PinholeIntrinsics,
     camera_to_world_opengl,
@@ -57,6 +61,12 @@ def render_optical_references(
 
     ``dataset_dir`` is an existing ``rf-camera-multiview`` output directory
     (``dataset_manifest.json``, ``camera_model.npz``, ``views/<id>/pose.json``).
+    The manifest is read with
+    :func:`plateau_rt.application.rf_dataset_manifest.load_rf_dataset_manifest`,
+    so schema v3 (multi-BS) and v2 (single-BS) datasets are accepted and any
+    other schema raises :class:`~plateau_rt.application.rf_dataset_manifest.ManifestError`
+    before anything is rendered or written. The render depends only on each
+    view's pose, so every view gets one render however many BSs it has.
     ``renderer`` is any object exposing ``.render(origins, directions, spp=,
     seed=)`` returning an object with ``rgb``/``hit``/``range_m`` attributes
     (see :class:`plateau_rt.adapters.sionna.optical_render.RayRenderResult`);
@@ -69,20 +79,24 @@ def render_optical_references(
     hemisphere RGBA PNG + range on the RF direction-cosine grid of
     ``camera_model.npz``. Writes ``transforms.json`` at the dataset root and
     updates ``dataset_manifest.json`` in place (adding ``optical_reference``
-    and per-view artifact paths). Re-running overwrites all of the above
+    and view-level artifact paths under ``views[].artifacts``, never under the
+    per-BS ``views[].bs[]`` entries). Re-running overwrites all of the above
     cleanly. Returns the path of ``transforms.json``.
     """
     dataset_dir = Path(dataset_dir)
-    manifest_path = dataset_dir / "dataset_manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    dataset = load_rf_dataset_manifest(dataset_dir)
+    # The typed reader validates the layout; the raw dict (the reader's own,
+    # not a copy) is what gets updated and written back so unknown keys survive.
+    manifest = dataset.raw
+    manifest_path = dataset.manifest_path
 
     if renderer is None:
-        renderer = _build_default_renderer(manifest, scene_xml)
+        renderer = _build_default_renderer(dataset, scene_xml)
 
     intrinsics = PinholeIntrinsics.from_horizontal_fov(int(width), int(height), float(fov_x_deg))
     pinhole_dirs_local = pinhole_ray_directions_local(intrinsics)
 
-    camera_model = np.load(dataset_dir / "camera_model.npz")
+    camera_model = np.load(dataset.camera_model_path)
     valid_mask = camera_model["valid_mask"]
     hemisphere_dirs_local = camera_model["ray_directions_local"]
     fft_rows, fft_cols = valid_mask.shape
@@ -90,12 +104,13 @@ def render_optical_references(
     pinhole_total = int(pinhole_dirs_local.shape[0] * pinhole_dirs_local.shape[1])
     hemisphere_total = int(np.count_nonzero(valid_mask))
 
-    views = manifest["views"]
     frames: list[dict[str, Any]] = []
-    for view_index, view in enumerate(views):
-        view_id = view["view_id"]
+    for dataset_view in dataset.views:
+        view_index = dataset_view.index
+        view_id = dataset_view.view_id
+        view = manifest["views"][view_index]
         view_dir = dataset_dir / "views" / view_id
-        pose = json.loads((view_dir / "pose.json").read_text(encoding="utf-8"))
+        pose = json.loads(dataset_view.pose_path.read_text(encoding="utf-8"))
         rotation = np.asarray(pose["world_from_local_rotation"], dtype=np.float64)
         position = np.asarray(pose["position_m"], dtype=np.float64)
 
@@ -148,7 +163,7 @@ def render_optical_references(
         )
 
         print(
-            f"  [{view_index + 1:02d}/{len(views):02d}] {view_id}: "
+            f"  [{view_index + 1:02d}/{dataset.num_views:02d}] {view_id}: "
             f"pinhole hits={pinhole_hits}/{pinhole_total}, "
             f"hemisphere hits={hemisphere_hits}/{hemisphere_total}"
         )
@@ -300,7 +315,7 @@ def _save_rgba_png(path: Path, rgba: np.ndarray) -> None:
     mpimg.imsave(path, rgba)
 
 
-def _build_default_renderer(manifest: dict[str, Any], scene_xml: Path | None) -> Any:
+def _build_default_renderer(dataset: RFDatasetManifest, scene_xml: Path | None) -> Any:
     """Build a :class:`RayRenderer` from ``scene_xml`` or the manifest's scene."""
     # Lazy imports: this module must stay importable without Sionna/Mitsuba.
     from sionna.rt import load_scene
@@ -310,7 +325,7 @@ def _build_default_renderer(manifest: dict[str, Any], scene_xml: Path | None) ->
     if scene_xml is not None:
         path = Path(scene_xml)
     else:
-        source_scene = manifest.get("source_scene")
+        source_scene = dataset.source_scene
         if not source_scene:
             raise FileNotFoundError(
                 "dataset_manifest.json has no 'source_scene'; pass --scene-xml explicitly"

@@ -18,14 +18,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 from PIL import Image
+from rf_manifest_fixtures import write_v2_dataset, write_v3_dataset
 
 from plateau_rt.application.optical_reference import render_optical_references
+from plateau_rt.application.rf_dataset_manifest import ManifestError, load_rf_dataset_manifest
 from plateau_rt.domain.rf_camera.calibration import rotation_matrix
-from plateau_rt.domain.rf_camera.camera import (
-    build_direction_cosine_camera_model,
-    generate_ring_views,
-    view_pose_payload,
-)
+from plateau_rt.domain.rf_camera.camera import generate_ring_views
 from plateau_rt.domain.rf_camera.optical import (
     PinholeIntrinsics,
     camera_to_world_opengl,
@@ -37,6 +35,7 @@ WIDTH, HEIGHT, FOV_X_DEG = 16, 12, 90.0
 FFT_ROWS = FFT_COLS = 16
 SPP, SEED = 4, 7
 GROUND_RGB = (0.2, 0.4, 0.6)
+SOURCE_SCENE = "unused_scene.xml"
 
 
 @dataclass
@@ -78,32 +77,18 @@ class GroundPlaneRenderer:
         )
 
 
-def _build_dataset(tmp_path: Path) -> tuple[Path, list]:
-    """Build a tiny 2-view dataset_manifest.json + poses + camera_model.npz."""
+def _build_dataset(tmp_path: Path, *, schema_version: int = 3) -> tuple[Path, list]:
+    """Build a tiny 2-view RF dataset (manifest, poses, camera_model.npz, aperture CFRs).
+
+    Uses the shared synthetic-manifest writers so the manifest has the real
+    schema-v3 (2 BSs) or schema-v2 (1 BS) layout the typed reader validates.
+    """
     views = generate_ring_views(target=(0.0, 0.0, 0.0), radius_m=20.0, ue_height_m=8.0, num_views=2)
     dataset_dir = tmp_path / "dataset"
-    for view in views:
-        view_dir = dataset_dir / "views" / view.view_id
-        view_dir.mkdir(parents=True)
-        (view_dir / "pose.json").write_text(json.dumps(view_pose_payload(view)), encoding="utf-8")
-
-    camera_model = build_direction_cosine_camera_model(
-        fft_rows=FFT_ROWS,
-        fft_cols=FFT_COLS,
-        horizontal_spacing_lambda=0.5,
-        vertical_spacing_lambda=0.5,
-    )
-    np.savez(dataset_dir / "camera_model.npz", **camera_model)
-
-    manifest = {
-        "schema_version": 2,
-        "source_scene": "unused_scene.xml",
-        "views": [
-            {"view_id": view.view_id, "position_m": list(view.position), "artifacts": {}}
-            for view in views
-        ],
-    }
-    (dataset_dir / "dataset_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    writer = write_v3_dataset if schema_version == 3 else write_v2_dataset
+    writer(dataset_dir, views=views, source_scene=SOURCE_SCENE)
+    camera_model = np.load(dataset_dir / "camera_model.npz")
+    assert camera_model["valid_mask"].shape == (FFT_ROWS, FFT_COLS)
     return dataset_dir, views
 
 
@@ -272,8 +257,10 @@ def test_transforms_json_matches_domain_camera_to_world(tmp_path):
         assert (dataset_dir / frame["depth_file_path"]).is_file()
 
 
-def test_manifest_gains_optical_reference_and_per_view_artifacts(tmp_path):
-    dataset_dir, views = _build_dataset(tmp_path)
+@pytest.mark.parametrize("schema_version", [3, 2])
+def test_manifest_gains_optical_reference_and_per_view_artifacts(tmp_path, schema_version):
+    dataset_dir, views = _build_dataset(tmp_path, schema_version=schema_version)
+    manifest_before = json.loads((dataset_dir / "dataset_manifest.json").read_text())
     render_optical_references(
         dataset_dir,
         renderer=GroundPlaneRenderer(),
@@ -285,8 +272,12 @@ def test_manifest_gains_optical_reference_and_per_view_artifacts(tmp_path):
     )
 
     manifest = json.loads((dataset_dir / "dataset_manifest.json").read_text())
-    assert manifest["schema_version"] == 2
-    assert manifest["source_scene"] == "unused_scene.xml"  # untouched
+    assert manifest["schema_version"] == schema_version
+    assert manifest["source_scene"] == SOURCE_SCENE  # untouched
+    # Only optical keys are added: everything the RF writer recorded survives as is.
+    for key, value in manifest_before.items():
+        if key != "views":
+            assert manifest[key] == value
 
     optical = manifest["optical_reference"]
     assert "NOT an RF training target" in optical["purpose"]
@@ -306,8 +297,39 @@ def test_manifest_gains_optical_reference_and_per_view_artifacts(tmp_path):
         assert artifacts["optical_pinhole_range_m"] == f"{prefix}pinhole_range_m.npy"
         assert artifacts["optical_hemisphere_rgba"] == f"{prefix}hemisphere_rgba.png"
         assert artifacts["optical_hemisphere_range_m"] == f"{prefix}hemisphere_range_m.npy"
-        for rel_path in artifacts.values():
-            assert (dataset_dir / rel_path).is_file()
+        for name, rel_path in artifacts.items():
+            if name.startswith("optical_"):
+                assert (dataset_dir / rel_path).is_file()
+        # The RF entries are untouched; optical renders are view-level, never per BS.
+        before = manifest_before["views"][views.index(view)]
+        for name, rel_path in before["artifacts"].items():
+            assert artifacts[name] == rel_path
+        assert manifest["views"][views.index(view)].get("bs") == before.get("bs")
+
+    # The typed reader still parses the updated manifest and sees the optical
+    # artifacts on the view, not on the per-BS entries.
+    dataset = load_rf_dataset_manifest(dataset_dir)
+    assert dataset.num_bs == (2 if schema_version == 3 else 1)
+    for dataset_view in dataset.views:
+        assert dataset_view.artifact("optical_pinhole_rgba").is_file()
+        for bs_entry in dataset_view.bs:
+            assert not any(name.startswith("optical_") for name in bs_entry.artifacts)
+
+
+def test_unsupported_manifest_schema_is_rejected_before_rendering(tmp_path):
+    dataset_dir, _views = _build_dataset(tmp_path)
+    manifest_path = dataset_dir / "dataset_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["schema_version"] = 1
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    renderer = GroundPlaneRenderer()
+
+    with pytest.raises(ManifestError, match="schema_version"):
+        render_optical_references(dataset_dir, renderer=renderer, width=WIDTH, height=HEIGHT)
+
+    assert renderer.calls == []
+    assert not (dataset_dir / "transforms.json").exists()
+    assert not list(dataset_dir.glob("views/*/optical"))
 
 
 def test_render_optical_references_is_idempotent(tmp_path):

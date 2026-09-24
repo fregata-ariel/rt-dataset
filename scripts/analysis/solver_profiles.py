@@ -954,7 +954,8 @@ def main() -> None:
         payload, _, _ = run_scene(
             "mock",
             args.mock_xml,
-            cfg.tx_position,
+            # 単一BSのベンチマーク: 既定の RFMultiViewConfig の先頭 (唯一の) BS を使う
+            cfg.tx_positions[0],
             cfg.tx_look_at,
             mock_views,
             cfg,

@@ -1,7 +1,7 @@
-# 1 BS / multi-UE RF Camera Dataset
+# Multi-BS / multi-UE RF Camera Dataset
 
-This milestone extends the validated 1-BS / 1-UE RF camera into a multi-view
-dataset while keeping the observation model image-like and compact.
+This milestone extends the validated 1-BS / 1-UE RF camera into a multi-BS,
+multi-view dataset while keeping the observation model image-like and compact.
 
 ## Camera convention
 
@@ -70,20 +70,46 @@ m. The smoke test uses:
   vertical edge (`x = y = 5`, mid-height), not its centre
 - 8 UE views on a 30 m radius ring
 - UE height: 1.5 m
-- one BS at `(-50, -50, 30)` m
-- BS panel also looks at `(5, 5, 5)` m
+- BS `bs_000` at `(-50, -50, 30)` m
+- BS `bs_001` at `(60, 35, 25)` m
+- each BS panel looks at `(5, 5, 5)` m by default
+  (`--bs-look-at` can override per BS)
 - 8 x 8 Rx aperture, 0.5 lambda spacing
 - 3.5 GHz carrier
 - 100 MHz bandwidth
 - 64 uniformly spaced baseband frequency bins
 
-All eight receivers are solved in **one** Sionna `PathSolver` call.
+All eight receivers and both transmitters are solved in **one** Sionna
+`PathSolver` call.
 
-The mock has a single building and no ground, so each ring view receives only
-the direct BS path. Each view therefore has energy in one hemisphere only, and
-the views with the BS behind them (`ue_000004` to `ue_000006`) have empty
-front images. For the richer 4-building scene with a ground plane, see
-[Mock city (ground plane)](#mock-city-ground-plane) below.
+The mock has a single building and no ground. Each (view, BS) pair carries
+energy in one hemisphere only: `bs_000` is in front for `ue_000000`–`ue_000003`
+and `ue_000007` (behind for `ue_000004`–`ue_000006`), while `bs_001` is in
+front for `ue_000002`–`ue_000007` (behind for `ue_000000`/`ue_000001`). Energy
+then sits only in that hemisphere, and the 5 back-hemisphere pairs (3 for
+`bs_000`, 2 for `bs_001`) have empty front images (`dominant_delay_s` all NaN,
+`dominant_delay_power` 0 over the full disk).
+
+`bs_000` reaches `ue_000001` only through a weak through-edge residual
+at the LOS delay (single path at 371.88 ns, front energy 6.478e-07,
+~150x below a typical direct pair, dominant delay 370.0 ns over
+12849 valid pixels) because its LOS grazes the box edge. `bs_001`'s
+LOS to `ue_000005` is blocked by the box: that pair receives only a
+weak residual with two through-box paths, 316.16 ns at the LOS delay
+transmitted straight through the box and 371.92 ns reflected inside
+the box (total front energy 5.461e-07, dominant delays 320.0-370.0
+ns over 12849 valid pixels).
+
+All other front pairs show a single direct path whose dominant delay matches
+the geometric LOS within the 10 ns delay resolution (e.g. `ue_000000`/`bs_000`:
+350.83 ns LOS, 350.0 ns image, front energy 9.752e-05; `ue_000002`/`bs_001`:
+199.51 ns LOS, 200.0 ns image, 1.906e-04; `ue_000004`/`bs_001`: 310.72 ns LOS,
+310.0 ns image, 1.297e-04). `ue_000007`/`bs_001` receives its direct path
+(219.15 ns) plus a clean reflection off the box's +x wall (316.16 ns)
+and a weaker through-box path (371.92 ns) that is reflected inside
+the box; front energy 1.873e-04. It is the only pair with an exterior
+wall reflection in this mock. For the richer 4-building scene with a ground
+plane, see [Mock city (ground plane)](#mock-city-ground-plane) below.
 
 ## Mock city (ground plane)
 
@@ -175,32 +201,38 @@ or, for another scene or ring:
 ```bash
 PYTHONPATH=./src uv run python -m plateau_rt.cli.main rf-camera-multiview SCENE.xml OUT \
   --num-views 8 --radius-m 30 --ue-height-m 1.5 --target 5 5 5 \
-  --bs-position -50 -50 30 --frequency-bins 64 --bandwidth-mhz 100
+  --bs-position -50 -50 30 --bs-position 60 35 25 \
+  --frequency-bins 64 --bandwidth-mhz 100
 ```
+
+Repeat `--bs-position` for each base station. A single `--bs-position` keeps
+the original single-BS layout with `num_bs = 1`. Each BS looks at `--target`
+unless `--bs-look-at` is repeated once per BS.
 
 Poses and the camera model are in `src/plateau_rt/domain/rf_camera/camera.py`
 (NumPy only); Sionna tracing is in
 `src/plateau_rt/adapters/sionna/rf_camera_dataset.py`.
 
-CPU-only geometry/ray tests (no Sionna import):
+Unit tests (the Sionna adapter imports fine without a GPU):
 
 ```bash
-PYTHONPATH=./src uv run pytest tests -q
+scripts/ci/run-unit-tests.sh
 ```
 
 ## Expected Sionna CFR shape
 
-For the default 8-view mock:
+For the default 8-view, 2-BS mock:
 
 ```text
-(8, 128, 1, 1, 1, 64)
+(8, 128, 2, 1, 1, 64)
  ^   ^    ^  ^  ^   ^
  UE rxant tx txant t freq
 ```
 
 `rxant = 2 x 64`: Sionna fuses the pattern axis pattern-major, so channels
 `0..63` are the front hemisphere and `64..127` the back hemisphere (each in
-PlanarArray column-first order).
+PlanarArray column-first order). The `tx` axis follows the order of
+`--bs-position` (`bs_000`, `bs_001`, ...).
 
 ## Output layout
 
@@ -214,12 +246,16 @@ rf_camera_multiview/
       pose.json
       rf/
         aperture_cfr.npy
-        angular_cfr_center.npy
-        angular_power_center.npy
-        phase_valid_mask.npy
-        dominant_delay_s.npy
-        dominant_delay_power.npy
-        angular_power_center.png
+        bs_000/
+          angular_cfr_center.npy
+          angular_power_center.npy
+          phase_valid_mask.npy
+          dominant_delay_s.npy
+          dominant_delay_power.npy
+          angular_power_center.png
+        bs_001/
+          ...
+      optical/            # only after rf-camera-optical (one render per view)
     ue_000001/
       ...
 ```
@@ -227,17 +263,21 @@ rf_camera_multiview/
 ### Canonical vs derived data
 
 `aperture_cfr.npy` is the canonical compact RF observation,
-`[hemisphere, row, col, frequency]` with hemispheres `(front, back)`. It
-preserves the complex CFR on the physical UE aperture over frequency.
+`[bs, hemisphere, row, col, frequency]` with hemispheres `(front, back)` and
+BS ids `(bs_000, bs_001, ...)`. It preserves the complex CFR on the physical
+UE aperture over frequency for every base station.
 
-The following files are derived from the front hemisphere (as `A = kx * U`)
-and can be regenerated from the aperture CFR:
+The following files, stored per BS under `rf/bs_XXX/`, are derived from that
+BS's front hemisphere (as `A = kx * U`) and can be regenerated from the
+aperture CFR:
 
 - center-frequency calibrated angular complex image
 - center-frequency power image
 - phase-valid mask
-- dominant delay map
-- dominant-delay power
+- dominant delay map (`dominant_delay_s`: NaN outside the propagating disk and
+  wherever `dominant_delay_power` is 0, i.e. no energy from that BS in that
+  direction)
+- dominant-delay power (`dominant_delay_power`: 0 there)
 
 The full `[kz, ky, frequency]` or `[kz, ky, delay]` volume is intentionally not
 stored for every production view. This avoids a large storage multiplier while
@@ -270,17 +310,54 @@ ray_world = world_from_local_rotation @ ray_local
 
 This is the intended bridge to a Gaussian-Splatting camera model.
 
-## Manifest (schema version 2)
+## Manifest (schema version 3)
 
 Besides the configuration and frequency grid, `dataset_manifest.json` records
 
-- `raw_observation`: axis order and hemisphere names of `aperture_cfr`, and the
+- `config.tx_positions` (list of 3-vectors) plus optional `tx_look_ats`:
+  `config.tx_position` was replaced by `config.tx_positions` and
+  `RFMultiViewConfig(tx_position=...)` no longer exists (breaking change);
+- `base_stations`: `bs_id`, index, position and look-at of every BS;
+- `raw_observation`: axis order (`bs`, `hemisphere`, `row`, `col`,
+  `frequency_offset`), BS ids and hemisphere names of `aperture_cfr`, and the
   Rx element pattern;
 - `camera_model`: projection, developed hemisphere and the image quantity
   definition;
-- per view: pose, `bs_direction_local`, `bs_in_front_hemisphere` and
-  `hemisphere_energy` (sum of `|aperture_cfr|^2` per hemisphere), so views with
-  back-hemisphere energy can be found without loading the arrays.
+- `path_geometry_gt`: artifact plus the axis note `[rx(view), tx(bs), path]`
+  (with `synthetic_array=False`, Sionna's 5-D `[rx, rx_ant, tx, tx_ant, path]`,
+  and `axis_order` says so); the Sionna path attributes keep their tx axis
+  and are stored unreshaped;
+- per view: pose, `artifacts` (pose and `aperture_cfr`), and a `bs` list with
+  one entry per BS (`bs_id`, `bs_direction_local`,
+  `bs_in_front_hemisphere` and `hemisphere_energy`, the sum of
+  `|aperture_cfr|^2` per hemisphere), so views with back-hemisphere energy
+  can be found without loading the arrays.
+
+## Reading a dataset
+
+`plateau_rt.application.rf_dataset_manifest` is a small typed reader for
+`dataset_manifest.json` that needs only NumPy (no Sionna). New consumers
+should use it instead of indexing the JSON by hand:
+
+```python
+from plateau_rt.application.rf_dataset_manifest import load_rf_dataset_manifest
+
+dataset = load_rf_dataset_manifest("outputs/rf_camera_multiview")  # dir or manifest file
+dataset.bs_ids                 # ("bs_000", "bs_001")
+dataset.frequency_offsets_hz   # float64 [N]
+dataset.aperture_cfr_axis_order  # ("bs", "hemisphere", "row", "col", "frequency_offset")
+for view, bs in dataset.pairs():  # view-major, then BS order
+    bs.hemisphere_energy, bs.bs_in_front_hemisphere, bs.artifact("dominant_delay_s")
+cfr = dataset.load_aperture_cfr(view)  # [bs, hemisphere, row, col, freq]
+```
+
+It validates the layout (supported schema, BS order in every view, axis
+order, frequency-grid length) and raises `ManifestError` (a `ValueError`)
+otherwise. Artifact paths come back as absolute paths under the dataset
+directory. Schema-v2 datasets (single BS) are read as `B = 1`: the BS is
+built from `config.tx_position`/`tx_look_at` as `bs_000`, the per-view BS
+fields and derived images become that BS's entry, and `load_aperture_cfr`
+adds the leading `bs` axis. Unknown extra keys are ignored.
 
 ## Delay sampling note
 
@@ -306,7 +383,7 @@ Paths.cfr shape=...
 [08/08] ue_000007: ...
 ```
 
-Also share a few `views/*/rf/angular_power_center.png` images, preferably views
+Also share a few `views/*/rf/bs_*/angular_power_center.png` images, preferably views
 from different sides of the ring. We want to verify that the front-hemisphere
 camera and per-view pose rotations produce coherent but genuinely different
 observations.
@@ -314,7 +391,6 @@ observations.
 ## Not implemented yet
 
 - arbitrary view-list JSON input
-- 2+ BS illumination axes
 - chunk/resume
 - train/val/test split
 - explicit 3DGS training target normalization

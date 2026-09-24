@@ -112,6 +112,32 @@ def split_pattern_axis(
     return np.stack([reshape_planar_column_first(p, rows=rows, cols=cols) for p in patterns])
 
 
+def split_tx_pattern_axes(
+    rx_cfr: np.ndarray,
+    *,
+    num_tx: int,
+    num_patterns: int,
+    rows: int,
+    cols: int,
+) -> np.ndarray:
+    """Split one receiver's fused CFR into ``[tx, pattern, row, col, freq]``.
+
+    ``rx_cfr`` is one receiver's ``cfr[rx, :, :, 0, 0, :]`` with shape
+    ``[num_patterns*rows*cols, num_tx, freq]``. Each tx slice is split with
+    :func:`split_pattern_axis` and stacked on a leading tx axis.
+    """
+    rx_cfr = np.asarray(rx_cfr)
+    size = num_patterns * rows * cols
+    if rx_cfr.ndim != 3 or rx_cfr.shape[0] != size or rx_cfr.shape[1] != num_tx:
+        raise ValueError(f"Expected rx_cfr with shape [{size}, {num_tx}, freq], got {rx_cfr.shape}")
+    return np.stack(
+        [
+            split_pattern_axis(rx_cfr[:, tx, :], num_patterns=num_patterns, rows=rows, cols=cols)
+            for tx in range(num_tx)
+        ]
+    )
+
+
 def aperture_to_angular_fft(
     aperture_cfr: np.ndarray,
     *,

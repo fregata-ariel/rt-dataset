@@ -9,11 +9,18 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
+from plateau_rt.application.rf_dataset_manifest import (
+    APERTURE_CFR_AXIS_ORDER,
+    ManifestError,
+    RFDatasetManifest,
+    load_rf_dataset_manifest,
+)
 from plateau_rt.domain.rf_camera.optical import (
     PinholeIntrinsics,
     local_to_world_rays,
@@ -34,6 +41,41 @@ OPTICAL_RANGE_TOL = 1e-3
 # (単位ベクトルの丸め誤差 ~1e-16 よりずっと大きく、実際に軸に平行なレイの角度
 # 誤差よりずっと小さい)
 RAY_BOX_PARALLEL_EPS = 1e-9
+# LOS がクリアとみなす箱からの余裕 (ボックスをこの分だけ膨らませて判定する)
+LOS_CLEARANCE_M = 1.0
+
+
+def segment_clear_of_box(
+    p0: Sequence[float],
+    p1: Sequence[float],
+    box_min: Sequence[float],
+    box_max: Sequence[float],
+) -> bool:
+    """Return True when the segment p0-p1 does not intersect the box (slab method)."""
+    p0_arr = np.asarray(p0, dtype=np.float64)
+    p1_arr = np.asarray(p1, dtype=np.float64)
+    lo = np.asarray(box_min, dtype=np.float64)
+    hi = np.asarray(box_max, dtype=np.float64)
+    t_enter = 0.0
+    t_exit = 1.0
+    for axis in range(3):
+        origin = float(p0_arr[axis])
+        direction = float(p1_arr[axis] - p0_arr[axis])
+        if direction == 0.0:
+            if origin < lo[axis] or origin > hi[axis]:
+                return True
+            continue
+        t0 = (lo[axis] - origin) / direction
+        t1 = (hi[axis] - origin) / direction
+        if t0 > t1:
+            t0, t1 = t1, t0
+        t_enter = max(t_enter, t0)
+        t_exit = min(t_exit, t1)
+        if t_enter > t_exit:
+            return True
+    if t_exit < 0.0 or t_enter > 1.0:
+        return True
+    return False
 
 
 class Checker:
@@ -106,17 +148,32 @@ def check_rf_camera(c: Checker, rf: Path) -> None:
         )
 
 
-def check_multiview(c: Checker, mv: Path, num_views: int) -> None:
-    print("--- 1BS/multi-UE RF camera dataset ---")
+def check_multiview(c: Checker, mv: Path, num_views: int, num_bs: int) -> None:
+    print("--- multi-BS/multi-UE RF camera dataset ---")
     if not c.exists(mv / "dataset_manifest.json"):
         return
     manifest = json.loads((mv / "dataset_manifest.json").read_text())
     config = manifest["config"]
     views = manifest["views"]
-    c.check(manifest["schema_version"] == 2, f"schema_version: {manifest['schema_version']} == 2")
+    c.check(manifest["schema_version"] == 3, f"schema_version: {manifest['schema_version']} == 3")
+    c.check(
+        manifest["mode"] == "multibs_multiue_rf_camera_dataset",
+        f"mode: {manifest['mode']}",
+    )
     c.check(len(views) == num_views, f"views: {len(views)} == {num_views}")
+    base_stations = manifest.get("base_stations", [])
+    c.check(len(base_stations) == num_bs, f"base_stations: {len(base_stations)} == {num_bs}")
     hemispheres = manifest["raw_observation"]["hemispheres"]
     c.check(hemispheres == ["front", "back"], f"hemispheres: {hemispheres}")
+    axis_order = manifest["raw_observation"]["axis_order"]
+    c.check(
+        axis_order == ["bs", "hemisphere", "row", "col", "frequency_offset"],
+        f"raw axis_order: {axis_order}",
+    )
+    c.check(
+        manifest["raw_observation"]["bs_ids"] == [bs["bs_id"] for bs in base_stations],
+        f"bs_ids: {manifest['raw_observation']['bs_ids']}",
+    )
 
     if c.exists(mv / "camera_model.npz"):
         model = np.load(mv / "camera_model.npz")
@@ -125,39 +182,140 @@ def check_multiview(c: Checker, mv: Path, num_views: int) -> None:
         c.check(shape == expected, f"camera rays shape: {shape} == {expected}")
         weight_shape = model["solid_angle_weight"].shape
         c.check(weight_shape == expected[:2], f"solid-angle weight shape: {weight_shape}")
-    c.exists(mv / "path_geometry_gt.npz")
+    # 経路GTは [rx(view), tx(bs), path] のtx軸を保つ (reshapeしない)
+    path_gt = manifest["path_geometry_gt"]
+    if isinstance(path_gt, dict):
+        axis_order_gt = path_gt["axis_order"]
+        if config.get("synthetic_array", True):
+            c.check(
+                axis_order_gt == ["rx", "tx", "path"],
+                f"path_geometry_gt axis_order: {axis_order_gt}",
+            )
+        else:
+            c.check(
+                axis_order_gt == ["rx", "rx_ant", "tx", "tx_ant", "path"],
+                f"path_geometry_gt axis_order: {axis_order_gt}",
+            )
+        gt_path = mv / path_gt["artifact"]
+        if c.exists(gt_path):
+            gt = np.load(gt_path)
+            if "tau" in gt:
+                tau = gt["tau"]
+                c.check(
+                    tau.ndim == len(axis_order_gt),
+                    f"path_geometry_gt tau ndim {tau.ndim} == len(axis_order) {len(axis_order_gt)}",
+                )
+                c.check(
+                    tau.shape[0] == num_views,
+                    f"path_geometry_gt tau.shape[0] {tau.shape[0]} == {num_views}",
+                )
+                tx_axis = axis_order_gt.index("tx")
+                c.check(
+                    tau.shape[tx_axis] == num_bs,
+                    f"path_geometry_gt tau.shape[{tx_axis}] {tau.shape[tx_axis]} == {num_bs}",
+                )
+    else:
+        c.exists(mv / path_gt)
 
-    aperture_shape = (
+    # 以降は共有の型付きリーダー経由で読む (レイアウトの整合性もここで検証される)
+    dataset = load_dataset(c, mv)
+    if dataset is None:
+        return
+    c.check(
+        dataset.aperture_cfr_axis_order == APERTURE_CFR_AXIS_ORDER,
+        f"reader aperture axis order: {list(dataset.aperture_cfr_axis_order)}",
+    )
+    aperture_shape = dataset.aperture_cfr_shape
+    expected_shape = (
+        num_bs,
         len(hemispheres),
         config["rx_rows"],
         config["rx_cols"],
         config["num_frequency_bins"],
     )
-    for view in views:
-        view_id = view["view_id"]
-        for name, rel in view["artifacts"].items():
-            c.exists(mv / rel)
-        # 前面・背面の少なくとも一方にはエネルギーが届いている
-        cfr = c.finite_nonzero(mv / view["artifacts"]["aperture_cfr"])
+    c.check(
+        aperture_shape == expected_shape,
+        f"reader aperture_cfr_shape {aperture_shape} == {expected_shape}",
+    )
+    for view in dataset.views:
+        view_id = view.view_id
+        for path in view.artifacts.values():
+            c.exists(path)
+        for bs_entry in view.bs:
+            for path in bs_entry.artifacts.values():
+                c.exists(path)
+        # 全BS合計で何らかのエネルギーが届いている
+        cfr = c.finite(view.aperture_cfr_path)
         shape_ok = cfr is not None and c.check(
             cfr.shape == aperture_shape, f"{view_id} aperture_cfr {cfr.shape}"
         )
         if shape_ok:
-            energy = {h: float(np.sum(np.abs(cfr[i]) ** 2)) for i, h in enumerate(hemispheres)}
-            recorded = view["hemisphere_energy"]
+            total_energy = float(np.sum(np.abs(cfr) ** 2))
+            c.check(total_energy > 0, f"{view_id} total energy nonzero ({total_energy:.3e})")
+            for bs_entry in view.bs:
+                bs_id = bs_entry.bs_id
+                energy = {
+                    h: float(np.sum(np.abs(cfr[bs_entry.bs_index, i]) ** 2))
+                    for i, h in enumerate(hemispheres)
+                }
+                recorded = bs_entry.hemisphere_energy
+                c.check(
+                    all(np.isclose(energy[h], recorded[h], rtol=1e-4) for h in hemispheres),
+                    f"{view_id} {bs_id} hemisphere energy matches manifest",
+                )
+                # mock は直接波が支配的なので、エネルギーの大半は BS のある半球から届く
+                # (前後の分割が入れ替わっていないことの確認)。BSからの到達が皆無の
+                # 場合は向きの判定ができないため、エネルギーが正のときだけ確認する
+                if sum(energy.values()) > 0:
+                    dominant = max(energy, key=energy.get)
+                    bs_side = "front" if bs_entry.bs_in_front_hemisphere else "back"
+                    c.check(
+                        dominant == bs_side,
+                        f"{view_id} {bs_id} dominant hemisphere {dominant} == {bs_side}",
+                    )
+        # 前面から何も届かない(BS, 視点)では現像画像が空になる (背面の光源と同じ扱い)
+        for bs_entry in view.bs:
+            c.finite(bs_entry.artifact("angular_power_center"))
+            # 位相が有効でない画素は NaN で埋められる
+            c.finite(bs_entry.artifact("dominant_delay_s"), allow_nan=True)
+
+    # 全ビュー合計で各BSが何らかのエネルギーを届けている (全ゼロBSの検出)
+    bs_total_energy = {bs_id: 0.0 for bs_id in dataset.bs_ids}
+    for _view, bs_entry in dataset.pairs():
+        bs_total_energy[bs_entry.bs_id] += bs_entry.total_energy
+    for bs_id, total in bs_total_energy.items():
+        c.check(total > 0, f"{bs_id} total energy over all views nonzero ({total:.3e})")
+
+    # 幾何学的LOSがクリアな (view, BS) ペアはエネルギーが正でなければならない
+    grown_min = tuple(MOCK_BOX_MIN - LOS_CLEARANCE_M)
+    grown_max = tuple(MOCK_BOX_MAX + LOS_CLEARANCE_M)
+    required_counts = {bs_id: 0 for bs_id in dataset.bs_ids}
+    for view, bs_entry in dataset.pairs():
+        station = dataset.base_stations[bs_entry.bs_index]
+        if segment_clear_of_box(station.position_m, view.position_m, grown_min, grown_max):
+            required_counts[bs_entry.bs_id] += 1
             c.check(
-                all(np.isclose(energy[h], recorded[h], rtol=1e-4) for h in hemispheres),
-                f"{view_id} hemisphere energy matches manifest",
+                bs_entry.total_energy > 0,
+                f"{view.view_id} {bs_entry.bs_id} clear-LOS energy nonzero "
+                f"({bs_entry.total_energy:.3e})",
             )
-            # mock は直接波が支配的なので、エネルギーの大半は BS のある半球から届く
-            # (前後の分割が入れ替わっていないことの確認)
-            dominant = max(energy, key=energy.get)
-            bs_side = "front" if view["bs_in_front_hemisphere"] else "back"
-            c.check(dominant == bs_side, f"{view_id} dominant hemisphere {dominant} == {bs_side}")
-        # 前面から何も届かない視点では現像画像が空になる (背面の光源と同じ扱い)
-        c.finite(mv / view["artifacts"]["angular_power_center"])
-        # 位相が有効でない画素は NaN で埋められる
-        c.finite(mv / view["artifacts"]["dominant_delay_s"], allow_nan=True)
+    for bs_id, count in required_counts.items():
+        c.check(True, f"{bs_id} clear-LOS pairs required nonzero: {count}/{dataset.num_views}")
+
+
+def load_dataset(c: Checker, mv: Path) -> RFDatasetManifest | None:
+    """共有リーダーで dataset_manifest.json を読む。失敗は NG として記録する。"""
+    try:
+        dataset = load_rf_dataset_manifest(mv)
+    except (ManifestError, OSError) as exc:
+        c.check(False, f"dataset manifest readable by rf_dataset_manifest: {exc}")
+        return None
+    c.check(
+        True,
+        f"dataset manifest readable by rf_dataset_manifest "
+        f"(schema v{dataset.schema_version}, {dataset.num_views} views, {dataset.num_bs} BS)",
+    )
+    return dataset
 
 
 def _max_abs_diff(a: np.ndarray, b: np.ndarray) -> float:
@@ -220,6 +378,9 @@ def check_optical(c: Checker, mv: Path) -> None:
         return
 
     print("--- optical reference renders (rf-camera-optical) ---")
+    dataset = load_dataset(c, mv)
+    if dataset is None:
+        return
     optical_cfg = manifest["optical_reference"]
     pinhole_cfg = optical_cfg["pinhole"]
     width, height = int(pinhole_cfg["width"]), int(pinhole_cfg["height"])
@@ -230,31 +391,42 @@ def check_optical(c: Checker, mv: Path) -> None:
     if not c.exists(transforms_path):
         return
     transforms = json.loads(transforms_path.read_text())
-    views = manifest["views"]
     c.check(
-        len(transforms["frames"]) == len(views),
-        f"transforms.json: {len(transforms['frames'])} frames == {len(views)} views",
+        len(transforms["frames"]) == dataset.num_views,
+        f"transforms.json: {len(transforms['frames'])} frames == {dataset.num_views} views",
     )
 
-    if not c.exists(mv / "camera_model.npz"):
+    if not c.exists(dataset.camera_model_path):
         return
-    camera_model = np.load(mv / "camera_model.npz")
+    camera_model = np.load(dataset.camera_model_path)
     valid_mask = camera_model["valid_mask"]
     hemisphere_dirs_local = camera_model["ray_directions_local"]
 
-    for view, frame in zip(views, transforms["frames"]):
-        view_id = view["view_id"]
-        artifacts = view["artifacts"]
-        for name in (
-            "optical_pinhole_rgba",
-            "optical_pinhole_depth_m",
-            "optical_pinhole_range_m",
-            "optical_hemisphere_rgba",
-            "optical_hemisphere_range_m",
-        ):
-            c.exists(mv / artifacts[name])
+    optical_names = (
+        "optical_pinhole_rgba",
+        "optical_pinhole_depth_m",
+        "optical_pinhole_range_m",
+        "optical_hemisphere_rgba",
+        "optical_hemisphere_range_m",
+    )
+    for view, frame in zip(dataset.views, transforms["frames"]):
+        view_id = view.view_id
+        # 光学レンダーは姿勢だけに依存するので、BSごとではなくビュー単位で1組だけ持つ
+        missing = [name for name in optical_names if name not in view.artifacts]
+        if not c.check(not missing, f"{view_id} view-level optical artifacts present {missing}"):
+            continue
+        per_bs = [
+            f"{entry.bs_id}:{name}"
+            for entry in view.bs
+            for name in entry.artifacts
+            if name.startswith("optical_")
+        ]
+        c.check(not per_bs, f"{view_id} no optical artifacts in per-BS entries {per_bs}")
+        artifacts = {name: view.artifact(name) for name in optical_names}
+        for path in artifacts.values():
+            c.exists(path)
 
-        pose = json.loads((mv / "views" / view_id / "pose.json").read_text())
+        pose = json.loads(view.pose_path.read_text())
         rotation = np.asarray(pose["world_from_local_rotation"], dtype=np.float64)
         position = np.asarray(pose["position_m"], dtype=np.float64)
 
@@ -273,14 +445,14 @@ def check_optical(c: Checker, mv: Path) -> None:
         )
 
         # --- pinhole: shape + 幾何 (analytic box intersection) ---
-        pinhole_rgba = np.asarray(Image.open(mv / artifacts["optical_pinhole_rgba"]))
+        pinhole_rgba = np.asarray(Image.open(artifacts["optical_pinhole_rgba"]))
         c.check(
             pinhole_rgba.shape == (height, width, 4),
             f"{view_id} pinhole rgba shape {pinhole_rgba.shape} == {(height, width, 4)}",
         )
-        depth = np.load(mv / artifacts["optical_pinhole_depth_m"])
+        depth = np.load(artifacts["optical_pinhole_depth_m"])
         c.check(depth.shape == (height, width), f"{view_id} pinhole depth shape {depth.shape}")
-        range_m = np.load(mv / artifacts["optical_pinhole_range_m"])
+        range_m = np.load(artifacts["optical_pinhole_range_m"])
         c.check(range_m.shape == (height, width), f"{view_id} pinhole range shape {range_m.shape}")
 
         origins, directions = local_to_world_rays(pinhole_dirs_local, rotation, position)
@@ -315,12 +487,12 @@ def check_optical(c: Checker, mv: Path) -> None:
         c.check(bool(np.all(alpha[~rendered_hit] == 0)), f"{view_id} pinhole alpha == 0 on misses")
 
         # --- hemisphere: shape + 幾何 (analytic box intersection) ---
-        hemisphere_rgba_png = np.asarray(Image.open(mv / artifacts["optical_hemisphere_rgba"]))
+        hemisphere_rgba_png = np.asarray(Image.open(artifacts["optical_hemisphere_rgba"]))
         c.check(
             hemisphere_rgba_png.shape == valid_mask.shape + (4,),
             f"{view_id} hemisphere rgba shape {hemisphere_rgba_png.shape}",
         )
-        hemisphere_range = np.load(mv / artifacts["optical_hemisphere_range_m"])
+        hemisphere_range = np.load(artifacts["optical_hemisphere_range_m"])
         c.check(
             hemisphere_range.shape == valid_mask.shape,
             f"{view_id} hemisphere range shape {hemisphere_range.shape}",
@@ -367,12 +539,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mock_out", type=Path, help="MOCK_OUT directory of the mock pipeline")
     parser.add_argument("--num-views", type=int, default=8)
+    parser.add_argument("--num-bs", type=int, default=2)
     args = parser.parse_args()
 
     c = Checker(args.mock_out)
     check_scene_and_coverage(c, args.mock_out)
     check_rf_camera(c, args.mock_out / "rf_camera")
-    check_multiview(c, args.mock_out / "rf_camera_multiview", args.num_views)
+    check_multiview(c, args.mock_out / "rf_camera_multiview", args.num_views, args.num_bs)
     check_optical(c, args.mock_out / "rf_camera_multiview")
 
     if c.failures:

@@ -41,7 +41,8 @@ rf-camera-delay-mock:
 
 rf-camera-multiview-mock: build-mock
 	$(PYTHON) -m plateau_rt.cli.main rf-camera-multiview $(MOCK_XML) $(RF_CAMERA_MULTIVIEW_OUT) \
-		--num-views 8 --radius-m 30 --ue-height-m 1.5 --target 5 5 5
+		--num-views 8 --radius-m 30 --ue-height-m 1.5 --target 5 5 5 \
+		--bs-position -50 -50 30 --bs-position 60 35 25
 
 rf-camera-optical-mock:
 	$(PYTHON) -m plateau_rt.cli.main rf-camera-optical $(RF_CAMERA_MULTIVIEW_OUT)

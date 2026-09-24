@@ -152,7 +152,15 @@ def rf_camera_delay(output_dir: Path, power_floor_db: float):
 @click.option("--radius-m", type=float, default=30.0, show_default=True)
 @click.option("--ue-height-m", type=float, default=1.5, show_default=True)
 @click.option("--target", nargs=3, type=float, default=(5.0, 5.0, 5.0), show_default=True)
-@click.option("--bs-position", nargs=3, type=float, default=(-50.0, -50.0, 30.0), show_default=True)
+@click.option(
+    "--bs-position",
+    multiple=True,
+    nargs=3,
+    type=float,
+    default=[(-50.0, -50.0, 30.0)],
+    show_default=True,
+)
+@click.option("--bs-look-at", multiple=True, nargs=3, type=float, default=None)
 @click.option("--rx-rows", type=int, default=8, show_default=True)
 @click.option("--rx-cols", type=int, default=8, show_default=True)
 @click.option("--carrier-ghz", type=float, default=3.5, show_default=True)
@@ -167,7 +175,8 @@ def rf_camera_multiview(
     radius_m: float,
     ue_height_m: float,
     target: tuple[float, float, float],
-    bs_position: tuple[float, float, float],
+    bs_position: tuple[tuple[float, float, float], ...],
+    bs_look_at: tuple[tuple[float, float, float], ...],
     rx_rows: int,
     rx_cols: int,
     carrier_ghz: float,
@@ -176,10 +185,12 @@ def rf_camera_multiview(
     max_depth: int,
     synthetic_array: bool,
 ):
-    """1 BS / multi-UEのRFカメラデータセットを生成します。
+    """複数BS / multi-UEのRFカメラデータセットを生成します。
 
     targetを中心とする半径radius-mのリング上にUE(RFカメラ)を配置し、
-    全UEを1回のPathSolver呼び出しでトレースします。BSもtargetを向きます。
+    全BSと全UEを1回のPathSolver呼び出しでトレースします。--bs-positionを
+    繰り返すと複数のBSを配置でき、各BSは既定でtargetを向きます
+    (--bs-look-atで個別の注視点も指定可能)。
     """
     from plateau_rt.application.scene_checks import check_scene_carrier_frequency
 
@@ -194,6 +205,11 @@ def rf_camera_multiview(
     from plateau_rt.domain.rf_camera.camera import generate_ring_views
 
     target = tuple(target)
+    if bs_look_at and len(bs_look_at) != len(bs_position):
+        raise click.BadParameter(
+            f"--bs-look-at count ({len(bs_look_at)}) must match "
+            f"--bs-position count ({len(bs_position)})"
+        )
     views = generate_ring_views(
         target=target,
         radius_m=radius_m,
@@ -204,8 +220,9 @@ def rf_camera_multiview(
         carrier_frequency_hz=carrier_ghz * 1e9,
         bandwidth_hz=bandwidth_mhz * 1e6,
         num_frequency_bins=frequency_bins,
-        tx_position=tuple(bs_position),
+        tx_positions=tuple(tuple(p) for p in bs_position),
         tx_look_at=target,
+        tx_look_ats=tuple(tuple(p) for p in bs_look_at) if bs_look_at else None,
         rx_rows=rx_rows,
         rx_cols=rx_cols,
         max_depth=max_depth,
@@ -238,17 +255,22 @@ def rf_camera_optical(
 ):
     """rf-camera-multiview の出力に位置合わせ済みの光学参照レンダーを追加します。"""
     from plateau_rt.application.optical_reference import render_optical_references
+    from plateau_rt.application.rf_dataset_manifest import ManifestError
 
     click.echo(click.style("=== Optical reference renders ===", fg="cyan", bold=True))
-    transforms_path = render_optical_references(
-        dataset_dir,
-        scene_xml=scene_xml,
-        width=width,
-        height=height,
-        fov_x_deg=fov_x_deg,
-        spp=spp,
-        seed=seed,
-    )
+    try:
+        transforms_path = render_optical_references(
+            dataset_dir,
+            scene_xml=scene_xml,
+            width=width,
+            height=height,
+            fov_x_deg=fov_x_deg,
+            spp=spp,
+            seed=seed,
+        )
+    except ManifestError as exc:
+        # 非対応スキーマや壊れたマニフェストは描画前にエラー終了する
+        raise click.ClickException(f"{dataset_dir}/dataset_manifest.json: {exc}") from exc
     click.echo(click.style(f"Success! transforms written to: {transforms_path}", fg="green"))
 
 

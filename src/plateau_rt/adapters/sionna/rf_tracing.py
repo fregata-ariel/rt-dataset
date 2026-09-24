@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 from sionna.rt import PathSolver, PlanarArray
 
-from plateau_rt.domain.rf_camera.imaging import split_pattern_axis
+from plateau_rt.domain.rf_camera.imaging import split_tx_pattern_axes
 
 PATH_ANGLE_FIELDS = ("theta_t", "phi_t", "theta_r", "phi_r")
 
@@ -85,18 +85,20 @@ def trace_paths(
     )
 
 
-def aperture_cfrs(
+def multi_tx_aperture_cfrs(
     paths: Any,
     frequency_offsets_hz: np.ndarray,
     *,
     num_rx: int,
+    num_tx: int,
     rx_rows: int,
     rx_cols: int,
 ) -> np.ndarray:
-    """Return the complex aperture CFR of every receiver, ``[rx, pattern, row, col, freq]``.
+    """Return the complex aperture CFR of every receiver and BS.
 
-    The pattern axis has one entry per receive antenna pattern, e.g. front and
-    back for :data:`~plateau_rt.adapters.sionna.rf_patterns.HEMISPHERE_SPLIT_PATTERN`.
+    Output is ``[rx, tx, pattern, row, col, freq]``. The pattern axis has one
+    entry per receive antenna pattern, e.g. front and back for
+    :data:`~plateau_rt.adapters.sionna.rf_patterns.HEMISPHERE_SPLIT_PATTERN`.
 
     ``Paths.cfr()`` operates on baseband frequency offsets around the scene's
     carrier. Keeping the carrier in ``scene.frequency`` avoids applying the
@@ -115,7 +117,7 @@ def aperture_cfrs(
 
     # [num_rx, num_rx_patterns * num_rx_ant, num_tx, num_tx_ant, time, frequency]
     num_patterns = len(paths.rx_array.antenna_pattern.patterns)
-    expected = (num_rx, num_patterns * rx_rows * rx_cols, 1, 1, 1, len(frequency_offsets_hz))
+    expected = (num_rx, num_patterns * rx_rows * rx_cols, num_tx, 1, 1, len(frequency_offsets_hz))
     if cfr.shape != expected:
         raise RuntimeError(
             f"Unexpected Sionna Paths.cfr shape: expected={expected}, actual={cfr.shape}"
@@ -123,12 +125,46 @@ def aperture_cfrs(
 
     return np.stack(
         [
-            split_pattern_axis(
-                cfr[rx, :, 0, 0, 0, :], num_patterns=num_patterns, rows=rx_rows, cols=rx_cols
+            split_tx_pattern_axes(
+                cfr[rx, :, :, 0, 0, :],
+                num_tx=num_tx,
+                num_patterns=num_patterns,
+                rows=rx_rows,
+                cols=rx_cols,
             )
             for rx in range(num_rx)
         ]
     )
+
+
+def aperture_cfrs(
+    paths: Any,
+    frequency_offsets_hz: np.ndarray,
+    *,
+    num_rx: int,
+    rx_rows: int,
+    rx_cols: int,
+) -> np.ndarray:
+    """Return the complex aperture CFR of every receiver, ``[rx, pattern, row, col, freq]``.
+
+    The pattern axis has one entry per receive antenna pattern, e.g. front and
+    back for :data:`~plateau_rt.adapters.sionna.rf_patterns.HEMISPHERE_SPLIT_PATTERN`.
+
+    ``Paths.cfr()`` operates on baseband frequency offsets around the scene's
+    carrier. Keeping the carrier in ``scene.frequency`` avoids applying the
+    carrier propagation phase a second time. Absolute path delays are kept
+    (``normalize_delays=False``).
+
+    Single-BS shorthand for :func:`multi_tx_aperture_cfrs` with ``num_tx=1``.
+    """
+    return multi_tx_aperture_cfrs(
+        paths,
+        frequency_offsets_hz,
+        num_rx=num_rx,
+        num_tx=1,
+        rx_rows=rx_rows,
+        rx_cols=rx_cols,
+    )[:, 0]
 
 
 def path_attributes(paths: Any, names: tuple[str, ...]) -> dict[str, np.ndarray]:

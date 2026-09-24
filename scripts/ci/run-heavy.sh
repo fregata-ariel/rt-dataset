@@ -40,8 +40,9 @@ gpu_run make MOCK_OUT="${MOCK_OUT}/" \
   rf-camera-multiview-mock rf-camera-optical-mock
 
 echo "🔍 Step 5: Validate generated outputs"
-# ビュー数は Makefile の rf-camera-multiview-mock (--num-views 8) と一致させる
-gpu_run python scripts/ci/check_mock_outputs.py "${MOCK_OUT}" --num-views 8
+# ビュー数・BS数は Makefile の rf-camera-multiview-mock (--num-views 8,
+# --bs-position x2) と一致させる
+gpu_run python scripts/ci/check_mock_outputs.py "${MOCK_OUT}" --num-views 8 --num-bs 2
 
 echo "🧭 Step 6: Front/back hemisphere split reproduces the isotropic element"
 gpu_run python scripts/ci/check_hemisphere_split.py "${MOCK_OUT}/mock_building.city.xml"

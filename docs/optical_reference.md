@@ -60,6 +60,21 @@ and, at the dataset root:
 Re-running `rf-camera-optical` overwrites all of the above cleanly
 (idempotent): it never needs the RF tracing stage to be re-run.
 
+### Multi-BS datasets (schema v3)
+
+The optical render depends only on each view's pose, not on the base
+stations, so a view gets **one** optical render however many BSs illuminate
+it. In a schema-v3 dataset the optical artifacts are therefore view-level
+entries (`views[].artifacts`), next to `pose` and `aperture_cfr`, while the
+RF images they overlay live per BS in `views[].bs[].artifacts`
+(`views/<id>/rf/bs_XXX/`). The same hemisphere render is pixel-aligned with
+every BS's image of that view.
+
+`rf-camera-optical` reads the manifest through
+`plateau_rt.application.rf_dataset_manifest` and accepts schema v3 and the
+earlier single-BS schema v2 (whose derived RF images sit directly under
+`views/<id>/rf/`); any other `schema_version` is rejected before rendering.
+
 ## Conventions
 
 ### Camera-local frame
@@ -120,8 +135,9 @@ no lens distortion (`k1=k2=p1=p2=0`).
 The hemisphere render uses exactly the front-hemisphere ray grid of
 `camera_model.npz` (`ray_directions_local[fft_rows, fft_cols, 3]`,
 `valid_mask[fft_rows, fft_cols]`) built by
-`build_direction_cosine_camera_model` -- the same grid the RF arrays
-(`views/<id>/rf/angular_power_center.npy`, and its debug PNG) are indexed on:
+`build_direction_cosine_camera_model` -- the same grid every per-BS RF array
+(`views/<id>/rf/bs_XXX/angular_power_center.npy`, and its debug PNG; in a
+schema-v2 dataset `views/<id>/rf/angular_power_center.npy`) is indexed on:
 **row = kz index, increasing upward in kz; column = ky index, increasing
 toward +ky.**
 
