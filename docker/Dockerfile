@@ -3,7 +3,9 @@
 # このファイル1本から3つのイメージを作る (docker compose build base prod dev)
 #   base : CUDA base + OS ライブラリ + uv + Python。プロジェクトに依存しない土台
 #   prod : 本番。uv.lock 通りの依存 (test グループを含む) + src。CI もこのイメージで実行する
-#   dev  : Devcontainer。prod + 開発ツール (jupyter, ty, git, sudo など)
+#   dev  : Devcontainer。prod と同じ依存 + 開発ツール (jupyter, ty, git, sudo など) + src
+# prod と dev は中間ステージ deps (依存のみ、src なし) から分岐し、src は最後にコピーする。
+# src の変更で dev の apt-get / 依存の層を作り直さないため (ネットワーク依存を減らす)。
 #
 # 全イメージ共通の非 root ユーザー app (UID 1000) で実行する。
 
@@ -51,15 +53,17 @@ ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
 USER app
 WORKDIR /app
 
-# ---------------------------------------------------------------------------- prod
-FROM base AS prod
+# ---------------------------------------------------------------------------- deps
+FROM base AS deps
 
-# 依存関係 (変更頻度が低い) を先に入れてレイヤーキャッシュを効かせる。
-# sionna-rt はサブモジュールのソースからビルドされる。
+# uv.lock 通りの依存 (test グループ) だけを入れる。sionna-rt はサブモジュールのソースからビルドされる。
 COPY --chown=app:app pyproject.toml uv.lock .python-version ./
 COPY --chown=app:app third_party/sionna-rt third_party/sionna-rt
 RUN --mount=type=cache,target=/home/app/.cache/uv,uid=1000,gid=1000 \
     uv sync --locked --no-default-groups --group test
+
+# ---------------------------------------------------------------------------- prod
+FROM deps AS prod
 
 COPY --chown=app:app src/ src/
 COPY --chown=app:app configs/ configs/
@@ -68,7 +72,7 @@ ENV PYTHONPATH=/app/src
 CMD ["python", "-m", "plateau_rt.cli.main"]
 
 # ---------------------------------------------------------------------------- dev
-FROM prod AS dev
+FROM deps AS dev
 
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -81,3 +85,7 @@ USER app
 # dev グループ (test を含む) を追加で入れる
 RUN --mount=type=cache,target=/home/app/.cache/uv,uid=1000,gid=1000 \
     uv sync --locked
+
+COPY --chown=app:app src/ src/
+COPY --chown=app:app configs/ configs/
+ENV PYTHONPATH=/app/src
