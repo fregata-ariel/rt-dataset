@@ -29,16 +29,31 @@ GPU (NVIDIA) と Docker / NVIDIA Container Toolkit を前提に、Docker イメ�
 git clone --recursive git@github.com:fregata-ariel/rt-dataset.git
 cd rt-dataset
 
-# GPU の Compute Capability を設定 (例: RTX 2080 Ti = 75, RTX 4090 = 89)
-cp .env.example .env
-
-# ベースイメージと Sionna-RT の Wheel ビルダーを作成
-docker compose build base
-docker compose build builder
+# base / prod (本番) / dev (開発) の3イメージを作成
+docker compose build
 ```
 
-その後 VS Code で「Dev Containers: Reopen in Container」を実行すると、
-`.devcontainer/` の開発環境 (依存関係は `uv sync --dev` で導入) が起動します。
+| イメージ | 用途 | 中身 |
+|---|---|---|
+| `plateau-sionna-base` | 土台 | CUDA base (Ubuntu 24.04) + OS ライブラリ + uv + Python 3.12 |
+| `plateau-sionna` | 本番・CI | base + `uv.lock` 通りの依存 (test グループ含む) + `src/` |
+| `plateau-sionna-dev` | Devcontainer | 本番 + jupyter / ty / git / sudo |
+
+3つとも `docker/Dockerfile` のマルチステージから作られ、非 root ユーザー `app` (UID 1000)
+で動きます。Python 依存は `/opt/venv` に入っており、バージョンは `uv.lock` と
+`.python-version` で固定しています。Mitsuba / Dr.Jit はホストの NVIDIA ドライバを使うため、
+GPU 世代ごとのビルドは不要です。
+
+本番イメージの実行例:
+
+```bash
+docker run --rm --gpus all -v "$PWD/data:/app/data" plateau-sionna \
+  python -m plateau_rt.cli.main build data/raw/mock_building.city.json data/generated/example
+```
+
+VS Code で「Dev Containers: Reopen in Container」を実行すると、dev イメージで開発環境が
+起動します (`uv sync --locked` で依存をロックファイルに合わせます)。
+コンテナ外でも `uv sync` で同じ依存を用意できます (sionna-rt はサブモジュールからビルド)。
 
 ## 使い方
 
@@ -126,4 +141,4 @@ GitHub Actions のセルフホストランナー (GPU ノード) で、push ご�
 `v*` / `milestone/*` タグで起動する重い GPU 検証を回しています。
 詳細は [docs/ci.md](docs/ci.md) を参照してください。
 
-Docker イメージ (base → builder → runtime) 自体の検証は `scripts/run-infra-test.sh` で行えます。
+本番イメージ上での Sionna-RT 自体の検証は `scripts/run-infra-test.sh` で行えます。

@@ -1,7 +1,8 @@
 # CI (GitHub Actions セルフホストランナー)
 
-GPU ノード (RTX 2080 Ti, `CUDA_ARCH=75`) 上のセルフホストランナーで、
-Docker の runtime イメージを使って2種類の CI を回します。
+GPU ノード (RTX 2080 Ti) 上のセルフホストランナーで、
+**本番イメージ (`docker/Dockerfile` の prod ステージ) そのもの**を使って2種類の CI を回します。
+本番イメージには test 依存グループ (pytest, ruff) が含まれています。
 
 | ワークフロー | トリガー | ランナーラベル | 内容 | 目安時間 (キャッシュ有) |
 |---|---|---|---|---|
@@ -33,7 +34,7 @@ git push origin milestone/1bs-multiue-rf-camera-dataset
    - 校正後の角度ピークと幾何 LoS 方向の誤差 ≤ 0.05
    - 最強ボクセルの遅延と LoS 遅延の誤差 ≤ 遅延分解能 (10 ns)
 
-runtime イメージには TensorFlow / JAX / PyTorch を入れていないため、Sionna-RT の
+本番イメージには TensorFlow / JAX / PyTorch を入れていないため、Sionna-RT の
 `test_cpx_convert` のうちそれらへの変換ケースは skip されます。
 
 Sionna-RT の GPU パストレースは実行ごとに完全には再現しません (パスの順序や
@@ -45,16 +46,17 @@ float の最下位桁が変わることがある)。そのため生成物の検�
 ランナーと同じスクリプトをそのまま実行できます。
 
 ```bash
-scripts/ci/build-images.sh     # base -> builder -> runtime -> ci
+scripts/ci/build-images.sh     # base, prod (引数で dev も: build-images.sh base prod dev)
 scripts/ci/run-lint.sh         # ruff check / format --check
 scripts/ci/run-unit-tests.sh   # 単体テスト
 scripts/ci/run-heavy.sh        # 節目の重い処理 (GPU)
 ```
 
-CI 用イメージは `plateau-sionna-ci-*:75` という名前でビルドされ、
-開発用 / Devcontainer が参照する `plateau-sionna-*:75` は上書きしません
-(`IMAGE_PREFIX` で切り替え)。
-コンテナはランナーと同じ UID で実行されるため、ワークスペースに root 所有のファイルは残りません。
+CI 用イメージは `plateau-sionna-ci`, `plateau-sionna-ci-base`, `plateau-sionna-ci-dev`
+という名前でビルドされ、開発者の `plateau-sionna*` は上書きしません (`IMAGE_PREFIX` で切り替え)。
+節目の CI では dev イメージもビルドし、Devcontainer が壊れていないことも確認します。
+コンテナはランナーと同じ UID (既定 1000 = イメージの `app` ユーザー) で実行されるため、
+ワークスペースに他ユーザー所有のファイルは残りません。
 
 ## セルフホストランナー
 
