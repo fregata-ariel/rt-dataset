@@ -71,9 +71,25 @@ def test_v3_round_trip(tmp_path: Path):
     assert bs_001.position_m == (60.0, 35.0, 25.0)
 
     assert manifest.path_geometry_gt is not None
-    assert manifest.path_geometry_gt.path == tmp_path / "path_geometry_gt.npz"
-    assert manifest.path_geometry_gt.axis_order == ("rx", "tx", "path")
-    assert manifest.path_geometry_gt.note
+    path_gt = manifest.path_geometry_gt
+    assert path_gt.path == tmp_path / "path_geometry_gt.npz"
+    assert path_gt.schema_path == tmp_path / "path_schema.json"
+    assert path_gt.synthetic_array is True
+    assert path_gt.array_axes("tau") == ("view", "bs", "path")
+    assert path_gt.array_axes("a_baseband") == (
+        "view",
+        "bs",
+        "hemisphere",
+        "row",
+        "col",
+        "path",
+    )
+    schema = path_gt.load_schema()
+    assert schema["mode"] == "canonical"
+    assert schema["synthetic_array"] is True
+    assert schema["bs_ids"] == ["bs_000", "bs_001"]
+    assert schema["view_ids"] == ["ue_000000", "ue_000001"]
+    assert set(path_gt.load_arrays()) >= {"valid", "tau", "a_baseband", "num_interactions"}
 
     assert manifest.raw == manifest_dict
     parsed = parse_rf_dataset_manifest(manifest_dict, root=tmp_path)
@@ -158,8 +174,14 @@ def test_v2_read_as_single_bs(tmp_path: Path):
     assert manifest.aperture_cfr_axis_order == APERTURE_CFR_AXIS_ORDER
     assert manifest.aperture_cfr_shape == (1, 2, ROWS, COLS, BINS)
     assert manifest.path_geometry_gt is not None
-    assert manifest.path_geometry_gt.path == tmp_path / "path_geometry_gt.npz"
-    assert manifest.path_geometry_gt.axis_order == ("rx", "tx", "path")
+    legacy_path_gt = manifest.path_geometry_gt
+    assert legacy_path_gt.path == tmp_path / "path_geometry_gt.npz"
+    assert legacy_path_gt.schema_path is None
+    assert legacy_path_gt.array_axes("tau") == ("view", "bs", "path")
+    with pytest.raises(ManifestError, match="path_schema"):
+        legacy_path_gt.load_schema()
+    with pytest.raises(ManifestError, match="a_baseband"):
+        legacy_path_gt.array_axes("a_baseband")
 
     for view_dict, view in zip(manifest_dict["views"], manifest.views):
         assert len(view.bs) == 1
@@ -305,13 +327,91 @@ def test_load_aperture_cfr_wrong_shape(tmp_path: Path):
 
 def test_unknown_extra_keys_ignored(tmp_path: Path):
     manifest_dict = write_v3_dataset(tmp_path)
-    manifest_dict["path_schema"] = {"version": 99}
+    manifest_dict["path_settings"] = {"version": 99}
     manifest_dict["observed"] = True
     manifest_dict["views"][0]["observed"] = {"by": "test"}
     manifest_dict["views"][0]["bs"][0]["observed"] = 1
     manifest = parse_rf_dataset_manifest(manifest_dict, root=tmp_path)
     assert manifest.num_views == 2
     assert manifest.view("ue_000000").bs_entry("bs_000").bs_id == "bs_000"
+
+
+def test_path_geometry_gt_dict_form_tolerated(tmp_path: Path):
+    manifest_dict = write_v3_dataset(tmp_path)
+    manifest_dict["path_geometry_gt"] = {
+        "artifact": "path_geometry_gt.npz",
+        "axis_order": ["ignored"],
+        "note": "legacy",
+    }
+    manifest = parse_rf_dataset_manifest(manifest_dict, root=tmp_path)
+    assert manifest.path_geometry_gt is not None
+    assert manifest.path_geometry_gt.path == tmp_path / "path_geometry_gt.npz"
+    assert manifest.path_geometry_gt.schema_path == tmp_path / "path_schema.json"
+
+
+def test_non_string_path_schema_rejected(tmp_path: Path):
+    manifest_dict = write_v3_dataset(tmp_path)
+    manifest_dict["path_schema"] = {"version": 99}
+    with pytest.raises(ManifestError, match="path_schema"):
+        parse_rf_dataset_manifest(manifest_dict, root=tmp_path)
+
+
+def test_missing_path_schema_file_raises(tmp_path: Path):
+    write_v3_dataset(tmp_path)
+    (tmp_path / "path_schema.json").unlink()
+    manifest = load_rf_dataset_manifest(tmp_path)
+    path_gt = manifest.path_geometry_gt
+    assert path_gt is not None
+    with pytest.raises(ManifestError, match="path_schema"):
+        path_gt.load_schema()
+
+
+def test_malformed_path_schema_raises(tmp_path: Path):
+    write_v3_dataset(tmp_path)
+    (tmp_path / "path_schema.json").write_text("not json", encoding="utf-8")
+    manifest = load_rf_dataset_manifest(tmp_path)
+    path_gt = manifest.path_geometry_gt
+    assert path_gt is not None
+    with pytest.raises(ManifestError, match="JSON"):
+        path_gt.load_schema()
+
+
+def test_schema_without_arrays_mapping_raises(tmp_path: Path):
+    write_v3_dataset(tmp_path)
+    (tmp_path / "path_schema.json").write_text(json.dumps({"mode": "canonical"}), encoding="utf-8")
+    manifest = load_rf_dataset_manifest(tmp_path)
+    path_gt = manifest.path_geometry_gt
+    assert path_gt is not None
+    with pytest.raises(ManifestError, match="arrays"):
+        path_gt.load_schema()
+
+
+def test_array_axes_unknown_key_raises(tmp_path: Path):
+    write_v3_dataset(tmp_path)
+    manifest = load_rf_dataset_manifest(tmp_path)
+    path_gt = manifest.path_geometry_gt
+    assert path_gt is not None
+    with pytest.raises(ManifestError, match="nope"):
+        path_gt.array_axes("nope")
+
+
+def test_v3_native_fallback_without_schema(tmp_path: Path):
+    manifest_dict = write_v3_dataset(tmp_path)
+    del manifest_dict["path_schema"]
+    manifest_dict["config"]["synthetic_array"] = False
+    (tmp_path / MANIFEST_FILE_NAME).write_text(
+        json.dumps(manifest_dict, indent=2), encoding="utf-8"
+    )
+    manifest = parse_rf_dataset_manifest(manifest_dict, root=tmp_path)
+    assert manifest.path_geometry_gt is not None
+    assert manifest.path_geometry_gt.schema_path is None
+    assert manifest.path_geometry_gt.array_axes("valid") == (
+        "view",
+        "rx_ant",
+        "bs",
+        "tx_ant",
+        "path",
+    )
 
 
 def test_optical_view_artifacts(tmp_path: Path):

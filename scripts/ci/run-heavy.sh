@@ -5,8 +5,9 @@
 #   3. Sionna-RT 本体 (submodule) のユニットテスト全体を GPU で実行
 #   4. モック建物での End-to-End パイプライン (Makefile の *-mock ターゲット)
 #   5. 生成物の検証 (形状・有限性・LoSの角度/遅延の整合性、前後の半球の向き、光学参照レンダー)
-#   6. 前面/背面分割パターンが等方性素子を正確に分割していることの確認
-#   7. 光学レイレンダラーが mock ボックス形状と一致することの確認
+#   6. パスGTから aperture CFR が再合成できることの確認
+#   7. 前面/背面分割パターンが等方性素子を正確に分割していることの確認
+#   8. 光学レイレンダラーが mock ボックス形状と一致することの確認
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
@@ -44,10 +45,13 @@ echo "🔍 Step 5: Validate generated outputs"
 # --bs-position x2) と一致させる
 gpu_run python scripts/ci/check_mock_outputs.py "${MOCK_OUT}" --num-views 8 --num-bs 2
 
-echo "🧭 Step 6: Front/back hemisphere split reproduces the isotropic element"
+echo "🧬 Step 6: Path GT resynthesises the aperture CFRs"
+gpu_run python scripts/ci/check_path_gt_resynthesis.py "${MOCK_OUT}/rf_camera_multiview"
+
+echo "🧭 Step 7: Front/back hemisphere split reproduces the isotropic element"
 gpu_run python scripts/ci/check_hemisphere_split.py "${MOCK_OUT}/mock_building.city.xml"
 
-echo "🎨 Step 7: Optical ray renderer matches the mock box geometry"
+echo "🎨 Step 8: Optical ray renderer matches the mock box geometry"
 gpu_run python scripts/ci/check_optical_render.py "${MOCK_OUT}/mock_building.city.xml"
 
 echo "✅ Heavy CI finished"

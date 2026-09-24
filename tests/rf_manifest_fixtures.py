@@ -26,6 +26,12 @@ from plateau_rt.domain.rf_camera.camera import (
     view_pose_payload,
 )
 from plateau_rt.domain.rf_camera.imaging import frequency_offsets
+from plateau_rt.domain.rf_camera.paths import (
+    PATH_GEOMETRY_GT_FILE_NAME,
+    PATH_GT_MODE_CANONICAL,
+    PATH_SCHEMA_FILE_NAME,
+    build_path_schema,
+)
 
 CARRIER_HZ = 3.5e9
 BANDWIDTH_HZ = 100e6
@@ -82,13 +88,36 @@ def _write_camera_model(root: Path) -> None:
     np.savez_compressed(root / "camera_model.npz", **model)
 
 
-def _write_path_geometry_gt(root: Path, *, num_views: int, num_bs: int) -> None:
-    """Write a placeholder ``path_geometry_gt.npz`` with ``[rx, tx, path]`` axes."""
-    np.savez_compressed(
-        root / "path_geometry_gt.npz",
-        valid=np.ones((num_views, num_bs, 1), dtype=bool),
-        tau=np.zeros((num_views, num_bs, 1), dtype=np.float32),
+def _write_path_geometry_gt(
+    root: Path,
+    *,
+    num_views: int,
+    num_bs: int,
+    rows: int,
+    cols: int,
+    bs_ids: Sequence[str],
+    view_ids: Sequence[str],
+    write_schema: bool,
+) -> None:
+    """Write a small canonical ``path_geometry_gt.npz`` and, optionally, its schema."""
+    arrays = {
+        "valid": np.ones((num_views, num_bs, 2), dtype=bool),
+        "tau": np.zeros((num_views, num_bs, 2), dtype=np.float32),
+        "a_baseband": np.zeros((num_views, num_bs, 2, rows, cols, 2), dtype=np.complex64),
+        "num_interactions": np.zeros((num_views, num_bs, 2), dtype=np.int32),
+    }
+    np.savez_compressed(root / PATH_GEOMETRY_GT_FILE_NAME, **arrays)
+    if not write_schema:
+        return
+    schema = build_path_schema(
+        arrays,
+        mode=PATH_GT_MODE_CANONICAL,
+        object_names=["mock_building"],
+        carrier_frequency_hz=CARRIER_HZ,
+        bs_ids=bs_ids,
+        view_ids=view_ids,
     )
+    (root / PATH_SCHEMA_FILE_NAME).write_text(json.dumps(schema, indent=2), encoding="utf-8")
 
 
 def _write_placeholder_npy(path: Path) -> None:
@@ -129,7 +158,16 @@ def write_v3_dataset(
     num_views = len(views)
 
     _write_camera_model(root)
-    _write_path_geometry_gt(root, num_views=num_views, num_bs=num_bs)
+    _write_path_geometry_gt(
+        root,
+        num_views=num_views,
+        num_bs=num_bs,
+        rows=rows,
+        cols=cols,
+        bs_ids=bs_ids,
+        view_ids=[view.view_id for view in views],
+        write_schema=True,
+    )
 
     manifest_views: list[dict[str, Any]] = []
     for view_index, view in enumerate(views):
@@ -246,14 +284,8 @@ def write_v3_dataset(
                 "behind an optical camera."
             ),
         },
-        "path_geometry_gt": {
-            "artifact": "path_geometry_gt.npz",
-            "axis_order": ["rx", "tx", "path"],
-            "note": (
-                "Sionna path attributes (valid, tau, theta_t, phi_t, theta_r, phi_r) "
-                "keep the tx axis: [rx(view), tx(bs), path]."
-            ),
-        },
+        "path_geometry_gt": PATH_GEOMETRY_GT_FILE_NAME,
+        "path_schema": PATH_SCHEMA_FILE_NAME,
         "views": manifest_views,
     }
     (root / "dataset_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -280,7 +312,16 @@ def write_v2_dataset(
     num_views = len(views)
 
     _write_camera_model(root)
-    _write_path_geometry_gt(root, num_views=num_views, num_bs=1)
+    _write_path_geometry_gt(
+        root,
+        num_views=num_views,
+        num_bs=1,
+        rows=rows,
+        cols=cols,
+        bs_ids=["bs_000"],
+        view_ids=[view.view_id for view in views],
+        write_schema=False,
+    )
 
     manifest_views: list[dict[str, Any]] = []
     for view_index, view in enumerate(views):

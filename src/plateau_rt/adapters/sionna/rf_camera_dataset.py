@@ -31,10 +31,9 @@ from plateau_rt.adapters.plotting.rf_camera_plots import (
 )
 from plateau_rt.adapters.sionna.rf_patterns import HEMISPHERE_SPLIT_PATTERN
 from plateau_rt.adapters.sionna.rf_tracing import (
-    PATH_ANGLE_FIELDS,
     configure_rf_camera_arrays,
     multi_tx_aperture_cfrs,
-    path_attributes,
+    path_ground_truth,
     trace_paths,
 )
 from plateau_rt.application.scene_checks import check_scene_carrier_frequency
@@ -53,6 +52,11 @@ from plateau_rt.domain.rf_camera.camera import (
 )
 from plateau_rt.domain.rf_camera.delay import angular_cfr_to_delay, dominant_delay
 from plateau_rt.domain.rf_camera.imaging import aperture_to_angular_fft, frequency_offsets
+from plateau_rt.domain.rf_camera.paths import (
+    PATH_GEOMETRY_GT_FILE_NAME,
+    PATH_SCHEMA_FILE_NAME,
+    build_path_schema,
+)
 
 
 def _validate_3vector(value: Any, *, name: str) -> None:
@@ -247,10 +251,25 @@ class RFMultiViewDataset:
         camera_model_path = output_dir / "camera_model.npz"
         np.savez_compressed(camera_model_path, **camera_model)
 
-        path_gt_path = output_dir / "path_geometry_gt.npz"
-        path_gt = path_attributes(paths, ("valid", "tau") + PATH_ANGLE_FIELDS)
-        if path_gt:
-            np.savez_compressed(path_gt_path, **path_gt)
+        path_gt_path = output_dir / PATH_GEOMETRY_GT_FILE_NAME
+        path_gt = path_ground_truth(paths, scene, rx_rows=cfg.rx_rows, rx_cols=cfg.rx_cols)
+        np.savez_compressed(path_gt_path, **path_gt.arrays)
+
+        path_schema_path = output_dir / PATH_SCHEMA_FILE_NAME
+        path_schema_path.write_text(
+            json.dumps(
+                build_path_schema(
+                    path_gt.arrays,
+                    mode=path_gt.mode,
+                    object_names=path_gt.object_names,
+                    carrier_frequency_hz=cfg.carrier_frequency_hz,
+                    bs_ids=[bs_id for bs_id, _, _ in base_stations],
+                    view_ids=[view.view_id for view in self.views],
+                ),
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
         unambiguous_delay_s = cfg.num_frequency_bins / cfg.bandwidth_hz
         _warn_if_delay_aliased(paths, unambiguous_delay_s)
@@ -318,18 +337,8 @@ class RFMultiViewDataset:
                     "behind an optical camera."
                 ),
             },
-            "path_geometry_gt": {
-                "artifact": path_gt_path.name,
-                "axis_order": (
-                    ["rx", "tx", "path"]
-                    if cfg.synthetic_array
-                    else ["rx", "rx_ant", "tx", "tx_ant", "path"]
-                ),
-                "note": (
-                    "Sionna path attributes (valid, tau, theta_t, phi_t, theta_r, phi_r) "
-                    "keep the tx axis: [rx(view), tx(bs), path]."
-                ),
-            },
+            "path_geometry_gt": PATH_GEOMETRY_GT_FILE_NAME,
+            "path_schema": PATH_SCHEMA_FILE_NAME,
             "views": manifest_views,
         }
         manifest_path = output_dir / "dataset_manifest.json"

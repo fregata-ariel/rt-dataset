@@ -43,6 +43,9 @@ OPTICAL_RANGE_TOL = 1e-3
 RAY_BOX_PARALLEL_EPS = 1e-9
 # LOS がクリアとみなす箱からの余裕 (ボックスをこの分だけ膨らませて判定する)
 LOS_CLEARANCE_M = 1.0
+# パスGTのLoS遅延チェック許容誤差 (3 cm 相当)
+SPEED_OF_LIGHT_M_S = 299792458.0
+LOS_TAU_TOL_S = 1e-10
 
 
 def segment_clear_of_box(
@@ -182,41 +185,6 @@ def check_multiview(c: Checker, mv: Path, num_views: int, num_bs: int) -> None:
         c.check(shape == expected, f"camera rays shape: {shape} == {expected}")
         weight_shape = model["solid_angle_weight"].shape
         c.check(weight_shape == expected[:2], f"solid-angle weight shape: {weight_shape}")
-    # 経路GTは [rx(view), tx(bs), path] のtx軸を保つ (reshapeしない)
-    path_gt = manifest["path_geometry_gt"]
-    if isinstance(path_gt, dict):
-        axis_order_gt = path_gt["axis_order"]
-        if config.get("synthetic_array", True):
-            c.check(
-                axis_order_gt == ["rx", "tx", "path"],
-                f"path_geometry_gt axis_order: {axis_order_gt}",
-            )
-        else:
-            c.check(
-                axis_order_gt == ["rx", "rx_ant", "tx", "tx_ant", "path"],
-                f"path_geometry_gt axis_order: {axis_order_gt}",
-            )
-        gt_path = mv / path_gt["artifact"]
-        if c.exists(gt_path):
-            gt = np.load(gt_path)
-            if "tau" in gt:
-                tau = gt["tau"]
-                c.check(
-                    tau.ndim == len(axis_order_gt),
-                    f"path_geometry_gt tau ndim {tau.ndim} == len(axis_order) {len(axis_order_gt)}",
-                )
-                c.check(
-                    tau.shape[0] == num_views,
-                    f"path_geometry_gt tau.shape[0] {tau.shape[0]} == {num_views}",
-                )
-                tx_axis = axis_order_gt.index("tx")
-                c.check(
-                    tau.shape[tx_axis] == num_bs,
-                    f"path_geometry_gt tau.shape[{tx_axis}] {tau.shape[tx_axis]} == {num_bs}",
-                )
-    else:
-        c.exists(mv / path_gt)
-
     # 以降は共有の型付きリーダー経由で読む (レイアウトの整合性もここで検証される)
     dataset = load_dataset(c, mv)
     if dataset is None:
@@ -301,6 +269,138 @@ def check_multiview(c: Checker, mv: Path, num_views: int, num_bs: int) -> None:
             )
     for bs_id, count in required_counts.items():
         c.check(True, f"{bs_id} clear-LOS pairs required nonzero: {count}/{dataset.num_views}")
+
+    check_path_geometry(c, dataset, grown_min=grown_min, grown_max=grown_max)
+
+
+def check_path_geometry(
+    c: Checker,
+    dataset: RFDatasetManifest,
+    *,
+    grown_min: Sequence[float],
+    grown_max: Sequence[float],
+) -> None:
+    """Path-GT artifact: schema consistency and physical LoS delays via the reader."""
+    print("--- path-level ground truth ---")
+    path_gt = dataset.path_geometry_gt
+    if path_gt is None:
+        c.check(False, "manifest has path_geometry_gt")
+        return
+    c.exists(path_gt.path)
+    if path_gt.schema_path is None:
+        c.check(False, "manifest has path_schema")
+        return
+    c.exists(path_gt.schema_path)
+    try:
+        schema = path_gt.load_schema()
+    except ManifestError as exc:
+        c.check(False, f"path schema readable: {exc}")
+        return
+    c.check(
+        schema.get("mode") == "canonical",
+        f"path schema mode: {schema.get('mode')!r} == 'canonical'",
+    )
+    try:
+        arrays = path_gt.load_arrays()
+    except ManifestError as exc:
+        c.check(False, f"path GT arrays readable: {exc}")
+        return
+
+    c.check(
+        schema.get("bs_ids") == list(dataset.bs_ids),
+        f"path schema bs_ids {schema.get('bs_ids')} == {list(dataset.bs_ids)}",
+    )
+    c.check(
+        schema.get("view_ids") == list(dataset.view_ids),
+        f"path schema view_ids {schema.get('view_ids')} == {list(dataset.view_ids)}",
+    )
+
+    for name, spec in schema["arrays"].items():
+        if name not in arrays:
+            c.check(False, f"path GT array {name} present in npz")
+            continue
+        array = np.asarray(arrays[name])
+        shape_ok = tuple(array.shape) == tuple(spec.get("shape", ()))
+        dtype_ok = str(array.dtype) == spec.get("dtype")
+        c.check(
+            shape_ok and dtype_ok,
+            f"path GT {name} matches schema {spec.get('dtype')} {spec.get('shape')} "
+            f"(got {array.dtype} {array.shape})",
+        )
+
+    def axis_size(name: str, axis: str) -> int | None:
+        axes = path_gt.array_axes(name)
+        if axis not in axes or name not in arrays:
+            c.check(False, f"path GT {name} has axis {axis!r} (axes {list(axes)})")
+            return None
+        return int(np.asarray(arrays[name]).shape[axes.index(axis)])
+
+    axis_checks = {
+        ("valid", "view"): dataset.num_views,
+        ("valid", "bs"): dataset.num_bs,
+        ("a_baseband", "hemisphere"): len(dataset.hemispheres),
+        ("a_baseband", "row"): dataset.rx_rows,
+        ("a_baseband", "col"): dataset.rx_cols,
+    }
+    for (name, axis), expected in axis_checks.items():
+        size = axis_size(name, axis)
+        c.check(size == expected, f"path GT {name} axis {axis}: {size} == {expected}")
+
+    valid = np.asarray(arrays["valid"])
+    tau = np.asarray(arrays["tau"], dtype=np.float64)
+    num_interactions = np.asarray(arrays["num_interactions"])
+
+    max_deviation = 0.0
+    clear_pairs = 0
+    for v_index, view in enumerate(dataset.views):
+        for b_index, entry in enumerate(view.bs):
+            station = dataset.base_stations[entry.bs_index]
+            distance = float(
+                np.linalg.norm(
+                    np.asarray(station.position_m, dtype=np.float64)
+                    - np.asarray(view.position_m, dtype=np.float64)
+                )
+            )
+            los_tau = distance / SPEED_OF_LIGHT_M_S
+            v_mask = np.asarray(valid[v_index, b_index], dtype=bool)
+            count = int(np.count_nonzero(v_mask))
+            clear = segment_clear_of_box(station.position_m, view.position_m, grown_min, grown_max)
+            label = f"{view.view_id} {entry.bs_id}"
+            if count == 0:
+                if clear:
+                    c.check(False, f"{label} clear-LOS pair has at least one valid path")
+                continue
+
+            pair_tau = tau[v_index, b_index, :count]
+            pair_interactions = np.asarray(num_interactions[v_index, b_index, :count])
+            c.check(
+                bool((pair_tau >= los_tau - LOS_TAU_TOL_S).all()),
+                f"{label} no valid path arrives before |BS-UE|/c - tol",
+            )
+            los_paths = pair_interactions == 0
+            if los_paths.any():
+                deviation = np.abs(pair_tau[los_paths] - los_tau)
+                max_deviation = max(max_deviation, float(np.max(deviation)))
+                c.check(
+                    bool((deviation <= LOS_TAU_TOL_S).all()),
+                    f"{label} zero-interaction delays match |BS-UE|/c within {LOS_TAU_TOL_S:g} s",
+                )
+            if clear:
+                clear_pairs += 1
+                first_los = bool(pair_interactions[0] == 0)
+                first_deviation = abs(float(pair_tau[0]) - los_tau)
+                max_deviation = max(max_deviation, first_deviation)
+                c.check(
+                    first_los and first_deviation <= LOS_TAU_TOL_S,
+                    f"{label} first valid path is LoS (num_interactions="
+                    f"{int(pair_interactions[0])}, |tau-d/c|={first_deviation:.3e} s)",
+                )
+
+    c.check(
+        True,
+        f"path GT LoS delay check: {clear_pairs} clear-LOS pairs, "
+        f"max |tau - |BS-UE|/c| = {max_deviation:.3e} s",
+    )
 
 
 def load_dataset(c: Checker, mv: Path) -> RFDatasetManifest | None:

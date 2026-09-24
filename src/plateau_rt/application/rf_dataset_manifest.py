@@ -35,6 +35,16 @@ PER_BS_ARTIFACT_KEYS: tuple[str, ...] = (
     "dominant_delay_power",
     "debug_power_png",
 )
+LEGACY_PATH_GT_KEYS: tuple[str, ...] = (
+    "valid",
+    "tau",
+    "theta_t",
+    "phi_t",
+    "theta_r",
+    "phi_r",
+)
+DEFAULT_PATH_GT_AXES: tuple[str, ...] = ("view", "bs", "path")
+NATIVE_PATH_GT_AXES: tuple[str, ...] = ("view", "rx_ant", "bs", "tx_ant", "path")
 
 
 class ManifestError(ValueError):
@@ -133,11 +143,84 @@ class DatasetView:
 
 @dataclass(frozen=True)
 class PathGeometryGT:
-    """Path-geometry ground-truth artifact with its axis order."""
+    """Path-geometry ground-truth artifact plus its optional schema file.
+
+    ``synthetic_array`` is the writer's ``config.synthetic_array`` and only
+    drives the legacy axis fallback used when the dataset has no
+    ``path_schema`` (schema v2 or an older v3).
+    """
 
     path: Path
-    axis_order: tuple[str, ...]
-    note: str | None
+    schema_path: Path | None
+    synthetic_array: bool = True
+
+    def load_schema(self) -> dict[str, Any]:
+        """Load and validate the ``path_schema.json`` described by the manifest.
+
+        Raises ManifestError when no schema is referenced, the file cannot be
+        read, is not valid JSON, is not an object or has no ``arrays`` mapping.
+        """
+        if self.schema_path is None:
+            raise ManifestError(f"path geometry GT {self.path} has no path_schema")
+        try:
+            text = self.schema_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ManifestError(
+                f"path schema could not be read from {self.schema_path}: {exc}"
+            ) from exc
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ManifestError(f"path schema {self.schema_path} is not valid JSON: {exc}") from exc
+        if not isinstance(data, Mapping):
+            raise ManifestError(f"path schema {self.schema_path} must be a JSON object")
+        arrays = data.get("arrays")
+        if not isinstance(arrays, Mapping):
+            raise ManifestError(f"path schema {self.schema_path} has no 'arrays' mapping")
+        return dict(data)
+
+    def array_axes(self, name: str) -> tuple[str, ...]:
+        """Return the stored axis names of path-GT array ``name``.
+
+        Uses the schema when one is referenced. For a dataset without a
+        ``path_schema`` only the six legacy geometry keys are described, with
+        axes derived from ``synthetic_array``; anything else raises
+        ManifestError.
+        """
+        if not isinstance(name, str) or not name:
+            raise ManifestError(f"path GT array name must be a non-empty string, got {name!r}")
+        if self.schema_path is not None:
+            arrays = self.load_schema()["arrays"]
+            if name not in arrays:
+                raise ManifestError(
+                    f"path schema has no array {name!r}; known arrays: {sorted(arrays)}"
+                )
+            entry = arrays[name]
+            axes = entry.get("axes") if isinstance(entry, Mapping) else None
+            if not isinstance(axes, list) or any(not isinstance(axis, str) for axis in axes):
+                raise ManifestError(
+                    f"path schema array {name!r} 'axes' must be a list of strings, got {axes!r}"
+                )
+            return tuple(axes)
+        if name not in LEGACY_PATH_GT_KEYS:
+            raise ManifestError(
+                f"path geometry GT without a path_schema only describes "
+                f"{list(LEGACY_PATH_GT_KEYS)}, not {name!r}"
+            )
+        return DEFAULT_PATH_GT_AXES if self.synthetic_array else NATIVE_PATH_GT_AXES
+
+    def load_arrays(self) -> dict[str, np.ndarray]:
+        """Load every array stored in ``path_geometry_gt.npz`` as a fresh dict.
+
+        Raises ManifestError when the artifact cannot be loaded.
+        """
+        try:
+            with np.load(self.path) as data:
+                return {name: np.asarray(data[name]) for name in data.files}
+        except OSError as exc:
+            raise ManifestError(
+                f"path geometry GT could not be loaded from {self.path}: {exc}"
+            ) from exc
 
 
 @dataclass(frozen=True, eq=False)
@@ -351,39 +434,47 @@ def _require_axis_order(value: Any, *, name: str, default: tuple[str, ...]) -> t
     return tuple(items)
 
 
-def _default_path_gt_axis_order(config: Mapping[str, Any]) -> tuple[str, ...]:
-    """Derive the path-geometry axis order from ``config.synthetic_array``."""
-    if config.get("synthetic_array", True):
-        return ("rx", "tx", "path")
-    return ("rx", "rx_ant", "tx", "tx_ant", "path")
+def _require_schema_path(value: Any) -> str:
+    """Validate a ``path_schema`` value as a non-empty relative path string."""
+    if not isinstance(value, str) or not value:
+        raise ManifestError(f"'path_schema' must be a non-empty string, got {value!r}")
+    return value
 
 
 def _parse_path_geometry_gt(
-    value: Any, *, root: Path, config: Mapping[str, Any]
+    value: Any, *, root: Path, config: Mapping[str, Any], schema_value: Any
 ) -> PathGeometryGT | None:
-    """Parse v2 (plain string) or v3 (dict) ``path_geometry_gt`` payloads."""
+    """Parse the ``path_geometry_gt`` and ``path_schema`` manifest payloads.
+
+    Accepts a plain string (v2 and current v3) and the transitional dict form
+    ``{"artifact": ...}`` (only ``artifact`` is read; ``axis_order`` / ``note``
+    are ignored). ``path_schema`` must be a string when present.
+    """
     if value is None:
+        if schema_value is not None:
+            _require_schema_path(schema_value)
         return None
     if isinstance(value, str):
-        return PathGeometryGT(
-            path=root / value, axis_order=_default_path_gt_axis_order(config), note=None
-        )
-    if not isinstance(value, Mapping):
+        artifact = value
+    elif isinstance(value, Mapping):
+        artifact = value.get("artifact")
+        if not isinstance(artifact, str) or not artifact:
+            raise ManifestError(
+                "'path_geometry_gt' dict must have a non-empty string 'artifact' key, "
+                f"got {value!r}"
+            )
+    else:
         raise ManifestError(
-            f"'path_geometry_gt' must be a dict with an 'artifact' key, got {value!r}"
+            f"'path_geometry_gt' must be a string or a dict with an 'artifact' key, got {value!r}"
         )
-    artifact = value.get("artifact")
-    if not isinstance(artifact, str):
-        raise ManifestError(f"'path_geometry_gt' is missing required key 'artifact', got {value!r}")
-    axis_order = _require_axis_order(
-        value.get("axis_order"),
-        name="'path_geometry_gt' 'axis_order'",
-        default=_default_path_gt_axis_order(config),
+    schema_path = None
+    if schema_value is not None:
+        schema_path = root / _require_schema_path(schema_value)
+    return PathGeometryGT(
+        path=root / artifact,
+        schema_path=schema_path,
+        synthetic_array=bool(config.get("synthetic_array", True)),
     )
-    note = value.get("note")
-    if note is not None and not isinstance(note, str):
-        raise ManifestError(f"'path_geometry_gt' 'note' must be a string, got {note!r}")
-    return PathGeometryGT(path=root / artifact, axis_order=axis_order, note=note)
 
 
 def _parse_base_stations_v3(value: Any) -> tuple[BaseStationInfo, ...]:
@@ -706,7 +797,10 @@ def parse_rf_dataset_manifest(
         seen_view_ids.add(view.view_id)
 
     path_geometry_gt = _parse_path_geometry_gt(
-        data.get("path_geometry_gt"), root=root, config=config
+        data.get("path_geometry_gt"),
+        root=root,
+        config=config,
+        schema_value=data.get("path_schema"),
     )
 
     return RFDatasetManifest(

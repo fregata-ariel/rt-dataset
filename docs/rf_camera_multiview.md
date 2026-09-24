@@ -241,6 +241,7 @@ rf_camera_multiview/
   dataset_manifest.json
   camera_model.npz
   path_geometry_gt.npz
+  path_schema.json
   views/
     ue_000000/
       pose.json
@@ -283,6 +284,59 @@ The full `[kz, ky, frequency]` or `[kz, ky, delay]` volume is intentionally not
 stored for every production view. This avoids a large storage multiplier while
 keeping all information needed to regenerate it.
 
+## Path-level ground truth
+
+`path_geometry_gt.npz` stores the per-path Sionna ray data behind
+`aperture_cfr.npy`, so the observation can be resynthesised and analysed per
+path. `path_schema.json` is the single canonical description of it; the
+manifest records only the two file names.
+
+The canonical (synthetic-array) arrays use manifest order for views and BSs:
+
+```text
+valid, tau, theta_t, phi_t, theta_r, phi_r   [view, bs, path]
+a_baseband                                   [view, bs, hemisphere, row, col, path]
+interactions, object_index, primitives       [view, bs, path, depth]
+vertices                                     [view, bs, path, depth, xyz]
+num_interactions                             [view, bs, path]
+```
+
+`a_baseband` is split into `[hemisphere, row, col]` exactly like
+`aperture_cfr`. Paths are put in a canonical order (valid paths
+first, sorted by delay quantised to `tau_quantum_s=1e-12 s`, ties broken by
+descending power); the schema's `ordering` text documents that quantisation
+only reduces, not prevents, run-to-run reordering. Invalid paths have
+`tau < 0`. `object_index` indexes into the schema's `object_names` (sorted
+scene object names; -1 for none or unknown). Sionna's `load_scene` merges
+shapes that share a material by default, so the mock scenes report a single
+`merged-shapes` object; `primitives` and `vertices` still locate each
+interaction.
+
+The stored aperture CFR resynthesises as
+
+```text
+H[..., f] = sum_p a_baseband[..., p] * exp(-j*2*pi*frequency_offsets_hz[f]*tau[p])
+```
+
+Only `a_baseband` is stored; the passband coefficient follows from
+`a = a_baseband * exp(+j*2*pi*carrier_frequency_hz*tau)` for valid paths.
+`a_baseband` is `views*bs*2*rows*cols*P*8` bytes, comparable to `aperture_cfr`
+once the number of paths `P` approaches the number of frequency bins.
+
+With `--explicit-array` (`config.synthetic_array == false`) Sionna's receive
+array is not synthesised, so there are no per-element coefficients. The schema
+mode is `sionna_native` and only the six geometry arrays above are stored
+unchanged in Sionna's native `[view, rx_ant, bs, tx_ant, path]` order.
+
+Read it through the typed reader (no Sionna needed):
+
+```python
+path_gt = dataset.path_geometry_gt
+schema = path_gt.load_schema()   # mode, axes, ordering, resynthesis
+arrays = path_gt.load_arrays()   # {'valid': ..., 'tau': ..., 'a_baseband': ..., ...}
+path_gt.array_axes("a_baseband")  # ('view', 'bs', 'hemisphere', 'row', 'col', 'path')
+```
+
 ## Optical reference renders
 
 `rf-camera-optical` adds a co-registered optical render (pinhole photo/depth
@@ -323,10 +377,11 @@ Besides the configuration and frequency grid, `dataset_manifest.json` records
   Rx element pattern;
 - `camera_model`: projection, developed hemisphere and the image quantity
   definition;
-- `path_geometry_gt`: artifact plus the axis note `[rx(view), tx(bs), path]`
-  (with `synthetic_array=False`, Sionna's 5-D `[rx, rx_ant, tx, tx_ant, path]`,
-  and `axis_order` says so); the Sionna path attributes keep their tx axis
-  and are stored unreshaped;
+- `path_geometry_gt`: artifact file name (`path_geometry_gt.npz`) of the
+  path-level ground truth;
+- `path_schema`: artifact file name (`path_schema.json`) of its single
+  canonical schema (array dtypes/shapes/axes/units, mode, ordering and the
+  resynthesis formula);
 - per view: pose, `artifacts` (pose and `aperture_cfr`), and a `bs` list with
   one entry per BS (`bs_id`, `bs_direction_local`,
   `bs_in_front_hemisphere` and `hemisphere_energy`, the sum of
