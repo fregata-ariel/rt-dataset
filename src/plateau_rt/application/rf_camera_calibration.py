@@ -13,6 +13,12 @@ from pathlib import Path
 
 import numpy as np
 
+from plateau_rt.adapters.plotting.rf_camera_plots import (
+    Marker,
+    image_extent,
+    normalized_power_db,
+    save_direction_image,
+)
 from plateau_rt.domain.rf_camera.calibration import (
     angular_peak_projection,
     calibrate_angular_cfr,
@@ -75,65 +81,34 @@ def calibrate_directory(output_dir: Path, phase_floor_db: float = -35.0) -> dict
     )
 
     power = np.abs(angular_slice) ** 2
-    peak_power = max(float(np.max(power)), 1e-30)
-    power_db = 10.0 * np.log10(np.maximum(power / peak_power, 1e-12))
-    phase = np.angle(angular_slice)
-    phase_masked = np.ma.masked_where(power_db < phase_floor_db, phase)
+    power_db = normalized_power_db(power, max(float(np.max(power)), 1e-30))
+    phase_masked = np.ma.masked_where(power_db < phase_floor_db, np.angle(angular_slice))
 
-    import matplotlib
+    extent = image_extent(calibration.ky_over_k, calibration.kz_over_k)
+    los_marker = Marker(los_ky, los_kz, "x", "geometric LoS")
 
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    extent = [
-        float(calibration.ky_over_k[0]),
-        float(calibration.ky_over_k[-1]),
-        float(calibration.kz_over_k[0]),
-        float(calibration.kz_over_k[-1]),
-    ]
-
-    power_png = output_dir / "angular_power_center_calibrated.png"
-    fig, ax = plt.subplots(figsize=(8, 6))
-    image = ax.imshow(
+    power_png = save_direction_image(
         power_db,
-        origin="lower",
+        output_dir / "angular_power_center_calibrated.png",
         extent=extent,
-        aspect="auto",
+        title="RF camera angular spectrum: calibrated normalized power [dB]",
+        colorbar_label="dB relative to peak",
         vmin=-60.0,
         vmax=0.0,
+        markers=[los_marker, Marker(peak_ky, peak_kz, "+", "strongest bin")],
     )
-    ax.scatter([los_ky], [los_kz], marker="x", label="geometric LoS")
-    ax.scatter([peak_ky], [peak_kz], marker="+", label="strongest bin")
-    ax.set_xlabel("UE-local horizontal direction cosine ky/k")
-    ax.set_ylabel("UE-local vertical direction cosine kz/k")
-    ax.set_title("RF camera angular spectrum: calibrated normalized power [dB]")
-    ax.legend()
-    fig.colorbar(image, ax=ax, label="dB relative to peak")
-    fig.tight_layout()
-    fig.savefig(power_png, dpi=150)
-    plt.close(fig)
-
-    phase_png = output_dir / "angular_phase_center_calibrated.png"
-    fig, ax = plt.subplots(figsize=(8, 6))
-    image = ax.imshow(
+    phase_png = save_direction_image(
         phase_masked,
-        origin="lower",
+        output_dir / "angular_phase_center_calibrated.png",
         extent=extent,
-        aspect="auto",
+        title=(
+            f"RF camera angular spectrum: calibrated phase [rad] (power >= {phase_floor_db:g} dB)"
+        ),
+        colorbar_label="phase [rad]",
         vmin=-np.pi,
         vmax=np.pi,
+        markers=[los_marker],
     )
-    ax.scatter([los_ky], [los_kz], marker="x", label="geometric LoS")
-    ax.set_xlabel("UE-local horizontal direction cosine ky/k")
-    ax.set_ylabel("UE-local vertical direction cosine kz/k")
-    ax.set_title(
-        f"RF camera angular spectrum: calibrated phase [rad] (power >= {phase_floor_db:g} dB)"
-    )
-    ax.legend()
-    fig.colorbar(image, ax=ax, label="phase [rad]")
-    fig.tight_layout()
-    fig.savefig(phase_png, dpi=150)
-    plt.close(fig)
 
     report_path = output_dir / "angular_calibration.json"
     report = {

@@ -16,8 +16,20 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from sionna.rt import PathSolver, PlanarArray, Receiver, Transmitter, load_scene
+from sionna.rt import Receiver, Transmitter, load_scene
 
+from plateau_rt.adapters.plotting.rf_camera_plots import (
+    image_extent,
+    normalized_power_db,
+    save_direction_image,
+)
+from plateau_rt.adapters.sionna.rf_tracing import (
+    PATH_ANGLE_FIELDS,
+    aperture_cfrs,
+    configure_rf_camera_arrays,
+    path_attributes,
+    trace_paths,
+)
 from plateau_rt.domain.rf_camera.calibration import (
     calibrate_angular_cfr,
     geometric_los_source_direction_local,
@@ -29,11 +41,7 @@ from plateau_rt.domain.rf_camera.camera import (
     view_pose_payload,
 )
 from plateau_rt.domain.rf_camera.delay import angular_cfr_to_delay, dominant_delay
-from plateau_rt.domain.rf_camera.imaging import (
-    aperture_to_angular_fft,
-    frequency_offsets,
-    reshape_planar_column_first,
-)
+from plateau_rt.domain.rf_camera.imaging import aperture_to_angular_fft, frequency_offsets
 
 
 @dataclass(frozen=True)
@@ -78,59 +86,6 @@ class RFMultiViewConfig:
             raise ValueError("FFT grid must not be smaller than the receive aperture")
 
 
-def _save_path_geometry_gt(paths: Any, output_path: Path) -> None:
-    payload: dict[str, np.ndarray] = {}
-    for name in ("valid", "tau", "theta_t", "phi_t", "theta_r", "phi_r"):
-        try:
-            payload[name] = np.asarray(getattr(paths, name))
-        except Exception as exc:  # pragma: no cover - backend dependent
-            print(f"Warning: could not export paths.{name}: {exc}")
-    if payload:
-        np.savez_compressed(output_path, **payload)
-
-
-def _render_power_debug(
-    power: np.ndarray,
-    *,
-    ky_over_k: np.ndarray,
-    kz_over_k: np.ndarray,
-    output_path: Path,
-    valid_mask: np.ndarray,
-) -> None:
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    power = np.asarray(power)
-    peak = max(float(np.max(power[valid_mask])), 1e-30) if np.any(valid_mask) else 1e-30
-    power_db = 10.0 * np.log10(np.maximum(power / peak, 1e-12))
-    power_db = np.ma.masked_where(~valid_mask, power_db)
-
-    extent = [
-        float(ky_over_k[0]),
-        float(ky_over_k[-1]),
-        float(kz_over_k[0]),
-        float(kz_over_k[-1]),
-    ]
-    fig, ax = plt.subplots(figsize=(7, 6))
-    image = ax.imshow(
-        power_db,
-        origin="lower",
-        extent=extent,
-        aspect="auto",
-        vmin=-60.0,
-        vmax=0.0,
-    )
-    ax.set_xlabel("UE-local ky/k")
-    ax.set_ylabel("UE-local kz/k")
-    ax.set_title("RF camera center-frequency power [dB rel. view peak]")
-    fig.colorbar(image, ax=ax, label="dB")
-    fig.tight_layout()
-    fig.savefig(output_path, dpi=120)
-    plt.close(fig)
-
-
 class RFMultiViewDataset:
     """Generate a compact 1-BS / multi-UE RF-camera dataset."""
 
@@ -151,27 +106,18 @@ class RFMultiViewDataset:
     def run(self, output_dir: Path) -> Path:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        views_dir = output_dir / "views"
-        views_dir.mkdir(parents=True, exist_ok=True)
 
         cfg = self.config
         scene = load_scene(str(self.xml_path))
         scene.frequency = cfg.carrier_frequency_hz
-
-        scene.tx_array = PlanarArray(
-            num_rows=1,
-            num_cols=1,
-            vertical_spacing=0.5,
-            horizontal_spacing=0.5,
-            pattern=cfg.tx_pattern,
-            polarization=cfg.polarization,
-        )
-        scene.rx_array = PlanarArray(
-            num_rows=cfg.rx_rows,
-            num_cols=cfg.rx_cols,
-            vertical_spacing=cfg.vertical_spacing_lambda,
-            horizontal_spacing=cfg.horizontal_spacing_lambda,
-            pattern=cfg.rx_pattern,
+        configure_rf_camera_arrays(
+            scene,
+            rx_rows=cfg.rx_rows,
+            rx_cols=cfg.rx_cols,
+            vertical_spacing_lambda=cfg.vertical_spacing_lambda,
+            horizontal_spacing_lambda=cfg.horizontal_spacing_lambda,
+            tx_pattern=cfg.tx_pattern,
+            rx_pattern=cfg.rx_pattern,
             polarization=cfg.polarization,
         )
 
@@ -200,42 +146,21 @@ class RFMultiViewDataset:
             f"spacing=({cfg.vertical_spacing_lambda}, {cfg.horizontal_spacing_lambda}) lambda"
         )
 
-        paths = PathSolver()(
-            scene=scene,
+        # All receivers are solved in one PathSolver call.
+        paths = trace_paths(
+            scene,
             max_depth=cfg.max_depth,
-            los=True,
-            specular_reflection=True,
-            diffuse_reflection=False,
-            refraction=True,
             synthetic_array=cfg.synthetic_array,
             seed=cfg.seed,
         )
-
-        frequency_offsets_hz = frequency_offsets(
-            cfg.bandwidth_hz,
-            cfg.num_frequency_bins,
+        frequency_offsets_hz = frequency_offsets(cfg.bandwidth_hz, cfg.num_frequency_bins)
+        apertures = aperture_cfrs(
+            paths,
+            frequency_offsets_hz,
+            num_rx=len(self.views),
+            rx_rows=cfg.rx_rows,
+            rx_cols=cfg.rx_cols,
         )
-        cfr = np.asarray(
-            paths.cfr(
-                frequencies=frequency_offsets_hz,
-                normalize_delays=False,
-                normalize=False,
-                out_type="numpy",
-            )
-        )
-        expected = (
-            len(self.views),
-            cfg.rx_rows * cfg.rx_cols,
-            1,
-            1,
-            1,
-            cfg.num_frequency_bins,
-        )
-        print(f"Paths.cfr shape={cfr.shape}, dtype={cfr.dtype}")
-        if cfr.shape != expected:
-            raise RuntimeError(
-                f"Unexpected multi-view Paths.cfr shape: expected={expected}, actual={cfr.shape}"
-            )
 
         camera_model = build_direction_cosine_camera_model(
             fft_rows=cfg.fft_rows,
@@ -247,143 +172,27 @@ class RFMultiViewDataset:
         np.savez_compressed(camera_model_path, **camera_model)
 
         path_gt_path = output_dir / "path_geometry_gt.npz"
-        _save_path_geometry_gt(paths, path_gt_path)
+        path_gt = path_attributes(paths, ("valid", "tau") + PATH_ANGLE_FIELDS)
+        if path_gt:
+            np.savez_compressed(path_gt_path, **path_gt)
 
         unambiguous_delay_s = cfg.num_frequency_bins / cfg.bandwidth_hz
-        try:
-            tau = np.asarray(paths.tau)
-            valid_tau = tau[tau >= 0.0]
-            max_tau = float(np.max(valid_tau)) if valid_tau.size else 0.0
-            if max_tau >= unambiguous_delay_s:
-                print(
-                    "WARNING: path delay exceeds the CFR unambiguous delay; "
-                    f"max path={max_tau * 1e9:.3f} ns, "
-                    f"unambiguous={unambiguous_delay_s * 1e9:.3f} ns. "
-                    "Increase num_frequency_bins or reduce bandwidth."
-                )
-        except Exception as exc:  # pragma: no cover
-            print(f"Warning: could not check delay aliasing: {exc}")
+        _warn_if_delay_aliased(paths, unambiguous_delay_s)
 
         manifest_views: list[dict[str, Any]] = []
-        center_bin = cfg.num_frequency_bins // 2
-        valid_ray_mask = camera_model["valid_mask"]
-
-        for view_index, view in enumerate(self.views):
-            view_dir = views_dir / view.view_id
-            rf_dir = view_dir / "rf"
-            rf_dir.mkdir(parents=True, exist_ok=True)
-
-            pose_payload = view_pose_payload(view)
-            (view_dir / "pose.json").write_text(
-                json.dumps(pose_payload, indent=2),
-                encoding="utf-8",
-            )
-
-            aperture_flat = cfr[view_index, :, 0, 0, 0, :]
-            aperture_cfr = reshape_planar_column_first(
-                aperture_flat,
-                rows=cfg.rx_rows,
-                cols=cfg.rx_cols,
-            )
-            np.save(
-                rf_dir / "aperture_cfr.npy",
-                aperture_cfr.astype(np.complex64, copy=False),
-            )
-
-            raw_angular = aperture_to_angular_fft(
-                aperture_cfr,
-                fft_rows=cfg.fft_rows,
-                fft_cols=cfg.fft_cols,
-            )
-            calibration = calibrate_angular_cfr(
-                raw_angular,
-                aperture_rows=cfg.rx_rows,
-                aperture_cols=cfg.rx_cols,
-                horizontal_spacing_lambda=cfg.horizontal_spacing_lambda,
-                vertical_spacing_lambda=cfg.vertical_spacing_lambda,
-            )
-
-            center_cfr = calibration.cfr[:, :, center_bin]
-            center_power = np.abs(center_cfr) ** 2
-            np.save(
-                rf_dir / "angular_cfr_center.npy",
-                center_cfr.astype(np.complex64, copy=False),
-            )
-            np.save(
-                rf_dir / "angular_power_center.npy",
-                center_power.astype(np.float32, copy=False),
-            )
-
-            view_peak = max(float(np.max(center_power[valid_ray_mask])), 1e-30)
-            phase_valid = valid_ray_mask & (
-                center_power >= view_peak * 10.0 ** (cfg.phase_floor_db / 10.0)
-            )
-            np.save(rf_dir / "phase_valid_mask.npy", phase_valid)
-
-            delay_volume = angular_cfr_to_delay(
-                calibration.cfr,
-                frequency_offsets_hz,
-            )
-            _, dominant_delay_s, dominant_power = dominant_delay(
-                np.abs(delay_volume.cir) ** 2,
-                delay_volume.delay_s,
-            )
-
-            dominant_delay_s = dominant_delay_s.astype(np.float32)
-            dominant_delay_s[~valid_ray_mask] = np.nan
-            dominant_power = dominant_power.astype(np.float32)
-            dominant_power[~valid_ray_mask] = 0.0
-            np.save(rf_dir / "dominant_delay_s.npy", dominant_delay_s)
-            np.save(rf_dir / "dominant_delay_power.npy", dominant_power)
-
-            debug_png = rf_dir / "angular_power_center.png"
-            _render_power_debug(
-                center_power,
-                ky_over_k=calibration.ky_over_k,
-                kz_over_k=calibration.kz_over_k,
-                output_path=debug_png,
-                valid_mask=valid_ray_mask,
-            )
-
-            bs_local = geometric_los_source_direction_local(
-                tx_position=cfg.tx_position,
-                ue_position=view.position,
-                ue_orientation=view.orientation,
-            )
-
+        for view_index, (view, aperture_cfr) in enumerate(zip(self.views, apertures)):
             manifest_views.append(
-                {
-                    "view_id": view.view_id,
-                    "position_m": list(view.position),
-                    "look_at_m": list(view.look_at),
-                    "orientation_rad": list(view.orientation),
-                    "bs_direction_local": bs_local.tolist(),
-                    "bs_in_front_hemisphere": bool(bs_local[0] >= 0.0),
-                    "artifacts": {
-                        "pose": str((view_dir / "pose.json").relative_to(output_dir)),
-                        "aperture_cfr": str((rf_dir / "aperture_cfr.npy").relative_to(output_dir)),
-                        "angular_cfr_center": str(
-                            (rf_dir / "angular_cfr_center.npy").relative_to(output_dir)
-                        ),
-                        "angular_power_center": str(
-                            (rf_dir / "angular_power_center.npy").relative_to(output_dir)
-                        ),
-                        "phase_valid_mask": str(
-                            (rf_dir / "phase_valid_mask.npy").relative_to(output_dir)
-                        ),
-                        "dominant_delay_s": str(
-                            (rf_dir / "dominant_delay_s.npy").relative_to(output_dir)
-                        ),
-                        "dominant_delay_power": str(
-                            (rf_dir / "dominant_delay_power.npy").relative_to(output_dir)
-                        ),
-                        "debug_power_png": str(debug_png.relative_to(output_dir)),
-                    },
-                }
+                self._write_view(
+                    output_dir,
+                    view,
+                    aperture_cfr,
+                    frequency_offsets_hz=frequency_offsets_hz,
+                    valid_ray_mask=camera_model["valid_mask"],
+                )
             )
             print(
                 f"  [{view_index + 1:02d}/{len(self.views):02d}] {view.view_id}: "
-                f"aperture={aperture_cfr.shape}, center={center_cfr.shape}"
+                f"aperture={aperture_cfr.shape}, center={(cfg.fft_rows, cfg.fft_cols)}"
             )
 
         manifest = {
@@ -418,3 +227,116 @@ class RFMultiViewDataset:
         print(f"camera model: {camera_model_path}")
         print(f"path geometry GT: {path_gt_path}")
         return manifest_path
+
+    def _write_view(
+        self,
+        output_dir: Path,
+        view: RFViewSpec,
+        aperture_cfr: np.ndarray,
+        *,
+        frequency_offsets_hz: np.ndarray,
+        valid_ray_mask: np.ndarray,
+    ) -> dict[str, Any]:
+        """Save one view's pose, canonical aperture CFR and derived summaries.
+
+        Returns the view's manifest entry.
+        """
+        cfg = self.config
+        view_dir = output_dir / "views" / view.view_id
+        rf_dir = view_dir / "rf"
+        rf_dir.mkdir(parents=True, exist_ok=True)
+        artifacts = {
+            "pose": view_dir / "pose.json",
+            "aperture_cfr": rf_dir / "aperture_cfr.npy",
+            "angular_cfr_center": rf_dir / "angular_cfr_center.npy",
+            "angular_power_center": rf_dir / "angular_power_center.npy",
+            "phase_valid_mask": rf_dir / "phase_valid_mask.npy",
+            "dominant_delay_s": rf_dir / "dominant_delay_s.npy",
+            "dominant_delay_power": rf_dir / "dominant_delay_power.npy",
+            "debug_power_png": rf_dir / "angular_power_center.png",
+        }
+
+        artifacts["pose"].write_text(
+            json.dumps(view_pose_payload(view), indent=2),
+            encoding="utf-8",
+        )
+        np.save(artifacts["aperture_cfr"], aperture_cfr.astype(np.complex64, copy=False))
+
+        calibration = calibrate_angular_cfr(
+            aperture_to_angular_fft(aperture_cfr, fft_rows=cfg.fft_rows, fft_cols=cfg.fft_cols),
+            aperture_rows=cfg.rx_rows,
+            aperture_cols=cfg.rx_cols,
+            horizontal_spacing_lambda=cfg.horizontal_spacing_lambda,
+            vertical_spacing_lambda=cfg.vertical_spacing_lambda,
+        )
+
+        center_cfr = calibration.cfr[:, :, cfg.num_frequency_bins // 2]
+        center_power = np.abs(center_cfr) ** 2
+        np.save(artifacts["angular_cfr_center"], center_cfr.astype(np.complex64, copy=False))
+        np.save(artifacts["angular_power_center"], center_power.astype(np.float32, copy=False))
+
+        view_peak = max(float(np.max(center_power[valid_ray_mask])), 1e-30)
+        phase_valid = valid_ray_mask & (
+            center_power >= view_peak * 10.0 ** (cfg.phase_floor_db / 10.0)
+        )
+        np.save(artifacts["phase_valid_mask"], phase_valid)
+
+        delay_volume = angular_cfr_to_delay(calibration.cfr, frequency_offsets_hz)
+        _, dominant_delay_s, dominant_power = dominant_delay(
+            np.abs(delay_volume.cir) ** 2,
+            delay_volume.delay_s,
+        )
+        dominant_delay_s = dominant_delay_s.astype(np.float32)
+        dominant_delay_s[~valid_ray_mask] = np.nan
+        dominant_power = dominant_power.astype(np.float32)
+        dominant_power[~valid_ray_mask] = 0.0
+        np.save(artifacts["dominant_delay_s"], dominant_delay_s)
+        np.save(artifacts["dominant_delay_power"], dominant_power)
+
+        save_direction_image(
+            np.ma.masked_where(~valid_ray_mask, normalized_power_db(center_power, view_peak)),
+            artifacts["debug_power_png"],
+            extent=image_extent(calibration.ky_over_k, calibration.kz_over_k),
+            title="RF camera center-frequency power [dB rel. view peak]",
+            colorbar_label="dB",
+            vmin=-60.0,
+            vmax=0.0,
+            xlabel="UE-local ky/k",
+            ylabel="UE-local kz/k",
+            figsize=(7, 6),
+            dpi=120,
+        )
+
+        bs_local = geometric_los_source_direction_local(
+            tx_position=cfg.tx_position,
+            ue_position=view.position,
+            ue_orientation=view.orientation,
+        )
+        return {
+            "view_id": view.view_id,
+            "position_m": list(view.position),
+            "look_at_m": list(view.look_at),
+            "orientation_rad": list(view.orientation),
+            "bs_direction_local": bs_local.tolist(),
+            "bs_in_front_hemisphere": bool(bs_local[0] >= 0.0),
+            "artifacts": {
+                name: str(path.relative_to(output_dir)) for name, path in artifacts.items()
+            },
+        }
+
+
+def _warn_if_delay_aliased(paths: Any, unambiguous_delay_s: float) -> None:
+    """Warn when a traced path is longer than the CFR's unambiguous delay."""
+    try:
+        tau = np.asarray(paths.tau)
+        valid_tau = tau[tau >= 0.0]
+        max_tau = float(np.max(valid_tau)) if valid_tau.size else 0.0
+        if max_tau >= unambiguous_delay_s:
+            print(
+                "WARNING: path delay exceeds the CFR unambiguous delay; "
+                f"max path={max_tau * 1e9:.3f} ns, "
+                f"unambiguous={unambiguous_delay_s * 1e9:.3f} ns. "
+                "Increase num_frequency_bins or reduce bandwidth."
+            )
+    except Exception as exc:  # pragma: no cover
+        print(f"Warning: could not check delay aliasing: {exc}")

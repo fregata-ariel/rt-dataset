@@ -15,12 +15,24 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from sionna.rt import PathSolver, PlanarArray, Receiver, Transmitter, load_scene
+from sionna.rt import Receiver, Transmitter, load_scene
 
+from plateau_rt.adapters.plotting.rf_camera_plots import (
+    image_extent,
+    normalized_power_db,
+    save_direction_image,
+)
+from plateau_rt.adapters.sionna.rf_tracing import (
+    PATH_ANGLE_FIELDS,
+    aperture_cfrs,
+    configure_rf_camera_arrays,
+    path_attributes,
+    trace_paths,
+)
 from plateau_rt.domain.rf_camera.imaging import (
     aperture_to_angular_fft,
     frequency_offsets,
-    reshape_planar_column_first,
+    raw_spatial_frequency_axes,
 )
 
 
@@ -91,24 +103,14 @@ class RFCameraMVP:
         cfg = self.config
         scene = load_scene(str(self.xml_path))
         scene.frequency = cfg.carrier_frequency_hz
-
-        # For the first milestone we excite one Tx antenna/port. This keeps
-        # transmit beamforming out of the RF-camera image-formation problem.
-        scene.tx_array = PlanarArray(
-            num_rows=1,
-            num_cols=1,
-            vertical_spacing=0.5,
-            horizontal_spacing=0.5,
-            pattern="tr38901",
-            polarization="V",
-        )
-        scene.rx_array = PlanarArray(
-            num_rows=cfg.rx_rows,
-            num_cols=cfg.rx_cols,
-            vertical_spacing=cfg.vertical_spacing_lambda,
-            horizontal_spacing=cfg.horizontal_spacing_lambda,
-            pattern="dipole",
-            polarization="V",
+        configure_rf_camera_arrays(
+            scene,
+            rx_rows=cfg.rx_rows,
+            rx_cols=cfg.rx_cols,
+            vertical_spacing_lambda=cfg.vertical_spacing_lambda,
+            horizontal_spacing_lambda=cfg.horizontal_spacing_lambda,
+            tx_pattern="tr38901",
+            rx_pattern="dipole",
         )
 
         tx = Transmitter(
@@ -135,49 +137,21 @@ class RFCameraMVP:
             f"({cfg.vertical_spacing_lambda}, {cfg.horizontal_spacing_lambda}) lambda"
         )
 
-        solver = PathSolver()
-        paths = solver(
-            scene=scene,
+        paths = trace_paths(
+            scene,
             max_depth=cfg.max_depth,
-            los=True,
-            specular_reflection=True,
-            diffuse_reflection=False,
-            refraction=True,
             synthetic_array=cfg.synthetic_array,
             seed=cfg.seed,
         )
-
-        # Paths.cfr() operates on baseband frequency offsets around the scene's
-        # carrier. Keeping the carrier in scene.frequency avoids applying the
-        # carrier propagation phase a second time.
         frequency_offsets_hz = frequency_offsets(cfg.bandwidth_hz, cfg.num_frequency_bins)
-        cfr = np.asarray(
-            paths.cfr(
-                frequencies=frequency_offsets_hz,
-                normalize_delays=False,
-                normalize=False,
-                out_type="numpy",
-            )
-        )
-
-        print(f"Paths.cfr shape={cfr.shape}, dtype={cfr.dtype}")
-        expected_rx_ant = cfg.rx_rows * cfg.rx_cols
-        expected_shape = (1, expected_rx_ant, 1, 1, 1, cfg.num_frequency_bins)
-        if cfr.shape != expected_shape:
-            raise RuntimeError(
-                "Unexpected Sionna Paths.cfr shape. "
-                f"expected={expected_shape}, actual={cfr.shape}. "
-                "Please share this log; the extractor should be adjusted before continuing."
-            )
-
-        # [num_rx, num_rx_ant, num_tx, num_tx_ant, time, frequency]
-        aperture_flat = cfr[0, :, 0, 0, 0, :]
-        aperture_cfr = reshape_planar_column_first(
-            aperture_flat,
-            rows=cfg.rx_rows,
-            cols=cfg.rx_cols,
-        )
         # Shape: [row, col, frequency]
+        aperture_cfr = aperture_cfrs(
+            paths,
+            frequency_offsets_hz,
+            num_rx=1,
+            rx_rows=cfg.rx_rows,
+            rx_cols=cfg.rx_cols,
+        )[0]
         print(f"aperture_cfr shape={aperture_cfr.shape}, dtype={aperture_cfr.dtype}")
 
         angular_cfr = aperture_to_angular_fft(
@@ -193,12 +167,19 @@ class RFCameraMVP:
         np.save(angular_path, angular_cfr.astype(np.complex64, copy=False))
 
         path_gt_path = output_dir / "path_gt.npz"
-        self._save_path_gt(paths, path_gt_path)
+        # cir() returns complex coefficients and delays. Keep absolute delays.
+        a, tau = paths.cir(normalize_delays=False, out_type="numpy")
+        np.savez_compressed(
+            path_gt_path,
+            a=np.asarray(a),
+            tau=np.asarray(tau),
+            **path_attributes(paths, ("valid",) + PATH_ANGLE_FIELDS),
+        )
 
         center_bin = cfg.num_frequency_bins // 2
         power_png = output_dir / "angular_power_center.png"
         phase_png = output_dir / "angular_phase_center.png"
-        _render_debug_images(
+        _render_raw_fft_images(
             angular_cfr[:, :, center_bin],
             power_png=power_png,
             phase_png=phase_png,
@@ -221,7 +202,7 @@ class RFCameraMVP:
                 "time",
                 "frequency_offset",
             ],
-            "sionna_cfr_shape": list(cfr.shape),
+            "sionna_cfr_shape": [1, cfg.rx_rows * cfg.rx_cols, 1, 1, 1, cfg.num_frequency_bins],
             "aperture_axis_order": ["row", "col", "frequency_offset"],
             "aperture_shape": list(aperture_cfr.shape),
             "planar_array_numbering": "column-first, top-left to bottom-right",
@@ -262,24 +243,8 @@ class RFCameraMVP:
             path_gt=path_gt_path,
         )
 
-    @staticmethod
-    def _save_path_gt(paths: Any, output_path: Path) -> None:
-        """Save enough path GT to diagnose CFR/image formation in the MVP."""
-        # cir() returns complex coefficients and delays. Keep absolute delays.
-        a, tau = paths.cir(normalize_delays=False, out_type="numpy")
-        payload: dict[str, np.ndarray] = {
-            "a": np.asarray(a),
-            "tau": np.asarray(tau),
-        }
-        for name in ("valid", "theta_t", "phi_t", "theta_r", "phi_r"):
-            try:
-                payload[name] = np.asarray(getattr(paths, name))
-            except Exception as exc:  # pragma: no cover - depends on Sionna backend
-                print(f"Warning: could not export paths.{name}: {exc}")
-        np.savez_compressed(output_path, **payload)
 
-
-def _render_debug_images(
+def _render_raw_fft_images(
     angular_slice: np.ndarray,
     *,
     power_png: Path,
@@ -287,55 +252,35 @@ def _render_debug_images(
     horizontal_spacing_lambda: float,
     vertical_spacing_lambda: float,
 ) -> None:
-    """Render log-power and phase diagnostics for one frequency bin."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
+    """Render log-power and phase diagnostics of the uncalibrated FFT image."""
     power = np.abs(angular_slice) ** 2
     peak = float(np.max(power)) if power.size else 0.0
-    power_db = 10.0 * np.log10(np.maximum(power / max(peak, 1e-30), 1e-12))
-    phase = np.angle(angular_slice)
-
-    # fftfreq values are cycles/sample. Dividing by d/lambda converts them to
-    # direction-cosine-like spatial coordinates k_axis/k for the planar array.
-    horizontal = np.fft.fftshift(np.fft.fftfreq(angular_slice.shape[1]))
-    vertical = np.fft.fftshift(np.fft.fftfreq(angular_slice.shape[0]))
-    horizontal = horizontal / horizontal_spacing_lambda
-    vertical = vertical / vertical_spacing_lambda
-    extent = [horizontal[0], horizontal[-1], vertical[0], vertical[-1]]
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-    image = ax.imshow(
-        power_db,
-        origin="lower",
-        extent=extent,
-        aspect="auto",
+    horizontal, vertical = raw_spatial_frequency_axes(
+        fft_rows=angular_slice.shape[0],
+        fft_cols=angular_slice.shape[1],
+        horizontal_spacing_lambda=horizontal_spacing_lambda,
+        vertical_spacing_lambda=vertical_spacing_lambda,
+    )
+    raw_axes = {
+        "extent": image_extent(horizontal, vertical),
+        "xlabel": "horizontal spatial coordinate ky/k",
+        "ylabel": "vertical spatial coordinate kz/k",
+    }
+    save_direction_image(
+        normalized_power_db(power, max(peak, 1e-30)),
+        power_png,
+        title="RF camera angular spectrum: normalized power [dB]",
+        colorbar_label="dB relative to peak",
         vmin=-60.0,
         vmax=0.0,
+        **raw_axes,
     )
-    ax.set_xlabel("horizontal spatial coordinate ky/k")
-    ax.set_ylabel("vertical spatial coordinate kz/k")
-    ax.set_title("RF camera angular spectrum: normalized power [dB]")
-    fig.colorbar(image, ax=ax, label="dB relative to peak")
-    fig.tight_layout()
-    fig.savefig(power_png, dpi=150)
-    plt.close(fig)
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-    image = ax.imshow(
-        phase,
-        origin="lower",
-        extent=extent,
-        aspect="auto",
+    save_direction_image(
+        np.angle(angular_slice),
+        phase_png,
+        title="RF camera angular spectrum: phase [rad]",
+        colorbar_label="phase [rad]",
         vmin=-np.pi,
         vmax=np.pi,
+        **raw_axes,
     )
-    ax.set_xlabel("horizontal spatial coordinate ky/k")
-    ax.set_ylabel("vertical spatial coordinate kz/k")
-    ax.set_title("RF camera angular spectrum: phase [rad]")
-    fig.colorbar(image, ax=ax, label="phase [rad]")
-    fig.tight_layout()
-    fig.savefig(phase_png, dpi=150)
-    plt.close(fig)

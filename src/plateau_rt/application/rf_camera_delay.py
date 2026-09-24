@@ -13,6 +13,13 @@ from pathlib import Path
 
 import numpy as np
 
+from plateau_rt.adapters.plotting.rf_camera_plots import (
+    Marker,
+    image_extent,
+    normalized_power_db,
+    pyplot,
+    save_direction_image,
+)
 from plateau_rt.domain.rf_camera.calibration import (
     direction_cosine_axes,
     geometric_los_source_direction_local,
@@ -142,52 +149,28 @@ def develop_angle_delay(
     if earliest_path is not None:
         print(f"earliest path_gt delay={earliest_path * 1e9:.3f} ns")
 
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    extent = [
-        float(ky_over_k[0]),
-        float(ky_over_k[-1]),
-        float(kz_over_k[0]),
-        float(kz_over_k[-1]),
-    ]
-
+    extent = image_extent(ky_over_k, kz_over_k)
+    los_marker = Marker(los_ky, los_kz, "x", "geometric LoS")
     global_peak_power = max(float(np.max(power[physical_mask, :])), 1e-30)
 
-    delay_slice = power[:, :, peak_delay_bin]
-    delay_slice_db = 10.0 * np.log10(np.maximum(delay_slice / global_peak_power, 1e-12))
-    delay_slice_db = np.ma.masked_where(~physical_mask, delay_slice_db)
-    delay_slice_png = output_dir / "angular_power_strongest_delay.png"
-    fig, ax = plt.subplots(figsize=(8, 6))
-    image = ax.imshow(
-        delay_slice_db,
-        origin="lower",
+    delay_slice_db = normalized_power_db(power[:, :, peak_delay_bin], global_peak_power)
+    delay_slice_png = save_direction_image(
+        np.ma.masked_where(~physical_mask, delay_slice_db),
+        output_dir / "angular_power_strongest_delay.png",
         extent=extent,
-        aspect="auto",
+        title=f"RF camera angle-delay: normalized power at {strongest_delay * 1e9:.1f} ns",
+        colorbar_label="dB relative to volume peak",
         vmin=-60.0,
         vmax=0.0,
+        markers=[
+            los_marker,
+            Marker(float(ky_over_k[peak_col]), float(kz_over_k[peak_row]), "+", "strongest voxel"),
+        ],
     )
-    ax.scatter([los_ky], [los_kz], marker="x", label="geometric LoS")
-    ax.scatter(
-        [ky_over_k[peak_col]],
-        [kz_over_k[peak_row]],
-        marker="+",
-        label="strongest voxel",
-    )
-    ax.set_xlabel("UE-local horizontal direction cosine ky/k")
-    ax.set_ylabel("UE-local vertical direction cosine kz/k")
-    ax.set_title(f"RF camera angle-delay: normalized power at {strongest_delay * 1e9:.1f} ns")
-    ax.legend()
-    fig.colorbar(image, ax=ax, label="dB relative to volume peak")
-    fig.tight_layout()
-    fig.savefig(delay_slice_png, dpi=150)
-    plt.close(fig)
 
-    profile_peak = max(float(np.max(los_profile)), 1e-30)
-    profile_db = 10.0 * np.log10(np.maximum(los_profile / profile_peak, 1e-12))
+    profile_db = normalized_power_db(los_profile, max(float(np.max(los_profile)), 1e-30))
     delay_profile_png = output_dir / "delay_profile_los_direction.png"
+    plt = pyplot()
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.plot(volume.delay_s * 1e9, profile_db)
     ax.axvline(geometric_delay_mod * 1e9, linestyle="--", label="geometric LoS")
@@ -207,30 +190,18 @@ def develop_angle_delay(
     plt.close(fig)
 
     _, dominant_delay_s, per_direction_peak = dominant_delay(power, volume.delay_s)
-    per_direction_db = 10.0 * np.log10(np.maximum(per_direction_peak / global_peak_power, 1e-12))
-    dominant_delay_ns = dominant_delay_s * 1e9
+    per_direction_db = normalized_power_db(per_direction_peak, global_peak_power)
     dominant_mask = physical_mask & (per_direction_db >= power_floor_db)
-    dominant_delay_plot = np.ma.masked_where(~dominant_mask, dominant_delay_ns)
-
-    dominant_delay_png = output_dir / "dominant_delay_map.png"
-    fig, ax = plt.subplots(figsize=(8, 6))
-    image = ax.imshow(
-        dominant_delay_plot,
-        origin="lower",
+    dominant_delay_png = save_direction_image(
+        np.ma.masked_where(~dominant_mask, dominant_delay_s * 1e9),
+        output_dir / "dominant_delay_map.png",
         extent=extent,
-        aspect="auto",
+        title=f"RF camera dominant delay [ns] (peak power >= {power_floor_db:g} dB)",
+        colorbar_label="dominant delay [ns]",
         vmin=0.0,
         vmax=volume.unambiguous_delay_s * 1e9,
+        markers=[los_marker],
     )
-    ax.scatter([los_ky], [los_kz], marker="x", label="geometric LoS")
-    ax.set_xlabel("UE-local horizontal direction cosine ky/k")
-    ax.set_ylabel("UE-local vertical direction cosine kz/k")
-    ax.set_title(f"RF camera dominant delay [ns] (peak power >= {power_floor_db:g} dB)")
-    ax.legend()
-    fig.colorbar(image, ax=ax, label="dominant delay [ns]")
-    fig.tight_layout()
-    fig.savefig(dominant_delay_png, dpi=150)
-    plt.close(fig)
 
     report_path = output_dir / "angle_delay_report.json"
     report = {
