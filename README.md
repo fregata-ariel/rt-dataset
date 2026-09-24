@@ -77,6 +77,8 @@ VS Code で「Dev Containers: Reopen in Container」を実行すると、dev イ
 | `make rf-camera-delay-mock` | 角度-遅延ボリュームへの展開 (GPU 不要) |
 | `make rf-camera-multiview-mock` | 1 BS / 8 UE のマルチビューデータセット |
 | `make rf-camera-optical-mock` | マルチビューデータセットに光学参照レンダーを追加 |
+| `make build-mock-city` | 4棟モックシティ + 200 m 地面プレーン → PLY / Mitsuba XML / manifest.json |
+| `make rf-camera-multiview-mock-city` | モックシティの 1 BS / 12 UE マルチビューデータセット |
 | `make clean` | 生成物の削除 |
 
 ### CLI
@@ -87,7 +89,7 @@ PYTHONPATH=./src python -m plateau_rt.cli.main --help
 
 | コマンド | 内容 |
 |---|---|
-| `build INPUT OUTPUT_DIR` | CityJSON から Sionna-RT シーンを生成 |
+| `build INPUT OUTPUT_DIR [--ground-plane-size-m 200]` | CityJSON から Sionna-RT シーンを生成 (`--ground-plane-size-m` で原点中心・一辺指定 m・z = -0.01 m の正方形地面を追加。0 で無効。地面材 `itu_medium_dry_ground` は 1-10 GHz のみ対応) |
 | `simulate XML MANIFEST OUTPUT_DIR` | カバレッジマップを計算 |
 | `run-all INPUT OUTPUT_DIR` | build からレンダリングまで一気通貫 |
 | `render DIR` / `view DIR` | ヒートマップ画像の生成 / ビューア |

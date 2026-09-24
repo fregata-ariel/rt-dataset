@@ -82,7 +82,87 @@ All eight receivers are solved in **one** Sionna `PathSolver` call.
 The mock has a single building and no ground, so each ring view receives only
 the direct BS path. Each view therefore has energy in one hemisphere only, and
 the views with the BS behind them (`ue_000004` to `ue_000006`) have empty
-front images. Richer scenes are tracked in #7.
+front images. For the richer 4-building scene with a ground plane, see
+[Mock city (ground plane)](#mock-city-ground-plane) below.
+
+## Mock city (ground plane)
+
+The mock city (`data/raw/mock_city.city.json`) has 4 concrete box buildings
+around a plaza centred on the origin:
+
+- nw: x[-26,-12] y[10,24] h18
+- ne: x[12,24] y[10,24] h30
+- se: x[10,26] y[-24,-12] h12
+- sw: x[-24,-12] y[-24,-10] h24
+
+`make build-mock-city` adds a 200 m square ground plane at z = -0.01 m
+(placed there to avoid coplanar faces with the building GroundSurface at
+z = 0), made of `itu_medium_dry_ground`.
+
+`make rf-camera-multiview-mock-city` uses 12 views on a 40 m radius ring,
+UE height 1.5 m, target (0, 0, 8) and BS at (-70, 5, 25).
+
+The BS is behind the camera (camera-local kx < 0) in `ue_000005` (kx = -0.4),
+`ue_000006` (kx = -0.7) and `ue_000007` (kx = -0.3), all three with unblocked
+line of sight. In these three views the **back**-hemisphere energy is mainly
+the direct LoS path and the **front** energy comes from building and ground
+reflections, which explains the large back/front ratios (e.g. +46.0 dB in
+`ue_000006`). `ue_000004` sees the direct path nearly grazing, just in front
+(kx = +0.07).
+
+Per-view hemisphere energies from one GPU run (rounded to 0.1 dB; GPU
+tracing is not bit-reproducible, so reruns will differ slightly):
+
+```text
+view        bs_front  kx_bs    front_dB   back_dB   back-front_dB
+ue_000000  True      +1.0      -40.2      -inf      -inf
+ue_000001  True      +0.9      -79.8      -inf      -inf
+ue_000002  True      +0.8      -67.3      -inf      -inf
+ue_000003  True      +0.5      -40.2      -inf      -inf
+ue_000004  True      +0.1      -38.9      -51.4     -12.5
+ue_000005  False     -0.4      -44.2      -34.8       9.4
+ue_000006  False     -0.7      -78.0      -32.0      46.0
+ue_000007  False     -0.3      -44.7      -36.0       8.7
+ue_000008  True      +0.2      -39.2      -inf      -inf
+ue_000009  True      +0.6      -40.4      -inf      -inf
+ue_000010  True      +0.8      -61.7      -inf      -inf
+ue_000011  True      +1.0      -61.1      -inf      -inf
+```
+
+(`-inf` means no traced energy in that hemisphere.)
+
+- **`ue_000004`:** its back-hemisphere energy (-51.4 dB) is mainly the
+  ground-reflected BS path. The mirror image of the BS in the ground plane is
+  at camera-local kx of about -0.06, while the direct path is just in front.
+- **All other views with the BS in front** (every view except `ue_000004` to
+  `ue_000007`) have an empty back hemisphere (`-inf`). No scatterer lies
+  behind the cameras: the buildings stay within 35.4 m of the origin, the
+  ring radius is 40 m, and every camera looks inward at the target. Their
+  ground reflection also arrives from the front. So in this scene,
+  back-hemisphere energy appears only when the BS itself, or its ground
+  image, is behind the camera.
+- **Blocked line of sight:** the direct BS path is geometrically blocked by
+  buildings for `ue_000001` (nw and ne), `ue_000002` (nw), `ue_000010` (sw)
+  and `ue_000011` (se). This is why their front energy is 20-40 dB below that
+  of the unblocked front views, which are around -40 dB.
+
+### Carrier limit of the ground material
+
+The ground material `itu_medium_dry_ground` is only defined for carriers
+from 1 to 10 GHz. `rf-camera` and `rf-camera-multiview` fail fast with exit
+code 2 and a clear message when the scene contains the ground plane and the
+carrier is outside that range, before any Sionna tracing starts:
+
+```text
+Error: Invalid value for --carrier-ghz: ITU material 'itu_medium_dry_ground'
+is only defined for carriers from 1 to 10 GHz, got 28.000000 GHz. Rebuild
+without --ground-plane-size-m or use a carrier inside the range.
+```
+
+The scene-build `manifest.json` records a `ground_plane` block with `size_m`,
+`z_m`, `material` and `valid_carrier_range_hz`. This key and the extra
+`ground_plane.ply` mesh appear only when the plane is enabled
+(`--ground-plane-size-m` > 0); a default build is unchanged.
 
 ## Run
 

@@ -4,6 +4,7 @@ from typing import List
 from xml.dom import minidom
 
 from plateau_rt.adapters.geometry.trimesh_adapter import MeshRecord
+from plateau_rt.domain.ground import GROUND_ITU_MATERIAL
 from plateau_rt.domain.models import MaterialType
 from plateau_rt.domain.models import Scene as DomainScene
 
@@ -15,6 +16,7 @@ class SionnaSceneCompiler:
         MaterialType.GLASS: "itu_glass",
         MaterialType.METAL: "itu_metal",
         MaterialType.DEFAULT: "itu_concrete",
+        MaterialType.GROUND: GROUND_ITU_MATERIAL,
     }
 
     def compile(
@@ -29,7 +31,7 @@ class SionnaSceneCompiler:
         scene_el = ET.Element("scene", version="3.0.0")
 
         # 1. 使用されるITUマテリアルの一覧を取得
-        used_itu_materials = set(self.MATERIAL_MAP[r.material] for r in mesh_records)
+        used_itu_materials = sorted(set(self.MATERIAL_MAP[r.material] for r in mesh_records))
 
         # 2. Sionnaが自動認識するプレースホルダー(mat-itu_...)を定義
         for itu_mat in used_itu_materials:

@@ -20,6 +20,7 @@ class MaterialType(Enum):
     GLASS = "glass"
     METAL = "metal"
     DEFAULT = "default"
+    GROUND = "ground"
 
 
 @dataclass

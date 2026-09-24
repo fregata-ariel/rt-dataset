@@ -34,6 +34,7 @@ from plateau_rt.adapters.sionna.rf_tracing import (
     path_attributes,
     trace_paths,
 )
+from plateau_rt.application.scene_checks import check_scene_carrier_frequency
 from plateau_rt.domain.rf_camera.calibration import (
     calibrate_angular_cfr,
     geometric_los_source_direction_local,
@@ -114,6 +115,7 @@ class RFMultiViewDataset:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         cfg = self.config
+        check_scene_carrier_frequency(self.xml_path, cfg.carrier_frequency_hz)
         scene = load_scene(str(self.xml_path))
         scene.frequency = cfg.carrier_frequency_hz
         configure_rf_camera_arrays(

@@ -13,6 +13,8 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.application.rf_camera_calibration",
     "plateau_rt.application.rf_camera_delay",
     "plateau_rt.application.optical_reference",
+    "plateau_rt.domain.ground",
+    "plateau_rt.application.scene_checks",
 ]
 
 

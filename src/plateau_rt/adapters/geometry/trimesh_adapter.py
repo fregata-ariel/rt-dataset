@@ -7,6 +7,11 @@ import numpy as np
 # 外部ライブラリ
 import trimesh
 
+from plateau_rt.domain.ground import (
+    GROUND_PLANE_ID,
+    GROUND_PLANE_Z_M,
+    ground_plane_mesh,
+)
 from plateau_rt.domain.models import MaterialType, Scene, Surface, SurfaceType
 
 
@@ -67,6 +72,31 @@ class TrimeshAdapter:
 
         print(f"Exported {len(records)} meshes to {self.output_dir}")
         return records
+
+    def export_ground_plane(self, size_m: float, z_m: float = GROUND_PLANE_Z_M) -> MeshRecord:
+        """Export a flat square ground plane as ``ground_plane.ply``.
+
+        Args:
+            size_m: Side length of the square in metres (must be > 0).
+            z_m: Height of the plane in metres.
+
+        Returns:
+            The :class:`MeshRecord` for the ground plane.
+        """
+        vertices, faces = ground_plane_mesh(size_m, z_m)
+        mesh = trimesh.Trimesh(
+            vertices=np.asarray(vertices, dtype=np.float32),
+            faces=np.asarray(faces, dtype=np.int32),
+            process=True,
+        )
+        ply_path = self.output_dir / f"{GROUND_PLANE_ID}.ply"
+        mesh.export(str(ply_path), file_type="ply")
+        return MeshRecord(
+            object_id=GROUND_PLANE_ID,
+            file_path=ply_path,
+            surface_type=SurfaceType.GROUND,
+            material=MaterialType.GROUND,
+        )
 
     def _build_mesh(self, surfaces: List[Surface]) -> trimesh.Trimesh:
         """複数の多角形Surfaceから、1つの三角形Trimeshを構築する"""

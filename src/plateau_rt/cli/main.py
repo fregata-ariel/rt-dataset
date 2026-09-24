@@ -14,10 +14,21 @@ def cli():
 @cli.command("build")
 @click.argument("input_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.argument("output_dir", type=click.Path(file_okay=False, path_type=Path))
-def build_scene(input_file: Path, output_dir: Path):
+@click.option(
+    "--ground-plane-size-m",
+    type=click.FloatRange(min=0.0),
+    default=0.0,
+    show_default=True,
+    help=(
+        "Side length in metres of an optional square ground plane centred on "
+        "the scene origin at z = -0.01 m. 0 disables the plane. "
+        "Its material itu_medium_dry_ground is only defined for carriers from 1 to 10 GHz."
+    ),
+)
+def build_scene(input_file: Path, output_dir: Path, ground_plane_size_m: float):
     """Step 1: CityJSONからSionna-RT用シーン(PLY/XML)とマニフェストを生成します。"""
     click.echo(f"Building scene from {input_file} into {output_dir}...")
-    builder = SceneBuilder(input_file, output_dir)
+    builder = SceneBuilder(input_file, output_dir, ground_plane_size_m=ground_plane_size_m)
     xml_path = builder.run()
     click.echo(click.style(f"Success! Scene XML generated at: {xml_path}", fg="green"))
 
@@ -70,6 +81,12 @@ def rf_camera(
     Raw aperture CFRと、2-D spatial FFTによる最初のangular-spectrum画像を出力します。
     MVPではBS側は1 active antenna/port、UE側は既定で8x8 planar apertureです。
     """
+    from plateau_rt.application.scene_checks import check_scene_carrier_frequency
+
+    try:
+        check_scene_carrier_frequency(xml_file, carrier_ghz * 1e9)
+    except ValueError as err:
+        raise click.BadParameter(str(err), param_hint="--carrier-ghz") from None
     from plateau_rt.adapters.sionna.rf_camera import RFCameraConfig, RFCameraMVP
 
     config = RFCameraConfig(
@@ -164,6 +181,12 @@ def rf_camera_multiview(
     targetを中心とする半径radius-mのリング上にUE(RFカメラ)を配置し、
     全UEを1回のPathSolver呼び出しでトレースします。BSもtargetを向きます。
     """
+    from plateau_rt.application.scene_checks import check_scene_carrier_frequency
+
+    try:
+        check_scene_carrier_frequency(xml_file, carrier_ghz * 1e9)
+    except ValueError as err:
+        raise click.BadParameter(str(err), param_hint="--carrier-ghz") from None
     from plateau_rt.adapters.sionna.rf_camera_dataset import (
         RFMultiViewConfig,
         RFMultiViewDataset,
