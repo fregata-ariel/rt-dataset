@@ -120,7 +120,7 @@ src/plateau_rt/
     build_scene.py         CityJSON → シーン生成パイプライン
     rf_camera_calibration.py, rf_camera_delay.py
                            RF カメラ出力ディレクトリの後処理 (GPU 不要)
-    optical_reference.py   光学参照レンダーの生成 (rf-camera-optical、GPU 不要)
+    optical_reference.py   光学参照レンダーの生成 (rf-camera-optical。既定のレンダラーは Mitsuba)
     viewer.py              カバレッジ結果ビューア
   adapters/
     plateau/               CityJSON パーサ

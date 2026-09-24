@@ -168,7 +168,7 @@ def render_optical_references(
         "pinhole": {
             "width": intrinsics.width,
             "height": intrinsics.height,
-            "fov_x_deg": intrinsics.fov_x_deg,
+            "fov_x_deg": float(fov_x_deg),
             "fx": intrinsics.fx,
             "fy": intrinsics.fy,
             "cx": intrinsics.cx,

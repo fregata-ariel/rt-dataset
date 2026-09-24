@@ -1,9 +1,11 @@
 """CPU-only tests for :mod:`plateau_rt.application.optical_reference`.
 
-A fake renderer stands in for :class:`RayRenderer`: an analytic infinite
-ground plane at world ``z = 0`` (hit iff the world ray direction has
-``dir_z < 0``, ``range = origin_z / -dir_z``, constant RGB on hits). This lets
-every geometric claim (hit mask, z-depth, range, the hemisphere PNG row flip)
+A fake renderer stands in for :class:`RayRenderer`: an analytic half ground
+plane at world ``z = 0`` restricted to ``y > 0`` (hit iff ``dir_z < 0`` and the
+ground point has ``y > 0``; ``range = origin_z / -dir_z``, constant RGB on
+hits). Restricting it to one side breaks the left-right symmetry of the ring
+views, so a mirrored image fails the tests. This lets every geometric claim
+(hit mask, z-depth, range, the hemisphere PNG row flip, left/right orientation)
 be checked against a closed-form expectation without Sionna/Mitsuba.
 """
 
@@ -44,8 +46,16 @@ class _FakeRenderResult:
     range_m: np.ndarray
 
 
+def _half_ground_hit(origins: np.ndarray, directions: np.ndarray) -> np.ndarray:
+    """Rays hitting the analytic half ground plane z = 0, y > 0."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = origins[..., 2] / -directions[..., 2]
+        ground_y = origins[..., 1] + t * directions[..., 1]
+    return (directions[..., 2] < -1e-12) & (ground_y > 0.0)
+
+
 class GroundPlaneRenderer:
-    """Analytic infinite ground plane at world z=0, standing in for RayRenderer."""
+    """Analytic half ground plane (z = 0, y > 0), standing in for RayRenderer."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[np.ndarray, np.ndarray, int, int]] = []
@@ -55,7 +65,7 @@ class GroundPlaneRenderer:
         directions = np.asarray(directions, dtype=np.float64)
         self.calls.append((origins.copy(), directions.copy(), spp, seed))
 
-        hit = directions[:, 2] < -1e-12
+        hit = _half_ground_hit(origins, directions)
         range_m = np.full(origins.shape[0], np.nan, dtype=np.float64)
         with np.errstate(divide="ignore", invalid="ignore"):
             range_m[hit] = origins[hit, 2] / -directions[hit, 2]
@@ -142,7 +152,7 @@ def _expected_pinhole_geometry(view):
     rotation = rotation_matrix(view.orientation)
     origins, dirs_world = local_to_world_rays(dirs_local, rotation, np.asarray(view.position))
 
-    hit = dirs_world[..., 2] < -1e-12
+    hit = _half_ground_hit(origins, dirs_world)
     range_m = np.full((HEIGHT, WIDTH), np.nan)
     range_m[hit] = origins[hit][:, 2] / -dirs_world[hit][:, 2]
     depth = range_m * dirs_local[..., 0]
@@ -206,7 +216,7 @@ def test_hemisphere_alpha_matches_analytic_ground_plane_and_valid_mask(tmp_path)
 
         expected_hit = np.zeros(valid_mask.shape, dtype=bool)
         expected_range = np.full(valid_mask.shape, np.nan)
-        valid_hit = dirs_world[..., 2] < -1e-12
+        valid_hit = _half_ground_hit(origins, dirs_world)
         expected_hit[valid_mask] = valid_hit[valid_mask]
         with np.errstate(divide="ignore", invalid="ignore"):
             valid_range = origins[..., 2] / -dirs_world[..., 2]
