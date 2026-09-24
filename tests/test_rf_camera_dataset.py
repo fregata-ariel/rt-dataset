@@ -1,7 +1,7 @@
 import numpy as np
 
-from plateau_rt.adapters.sionna.rf_camera_calibration import rotation_matrix_numpy
-from plateau_rt.adapters.sionna.rf_camera_dataset import (
+from plateau_rt.domain.rf_camera.calibration import rotation_matrix
+from plateau_rt.domain.rf_camera.camera import (
     build_direction_cosine_camera_model,
     generate_ring_views,
     look_at_orientation,
@@ -12,7 +12,7 @@ def test_look_at_orientation_points_local_x_at_target():
     position = (10.0, 0.0, 2.0)
     target = (0.0, 0.0, 2.0)
     orientation = look_at_orientation(position, target)
-    rotation = rotation_matrix_numpy(orientation)
+    rotation = rotation_matrix(orientation)
 
     expected = np.array([-1.0, 0.0, 0.0])
     np.testing.assert_allclose(rotation[:, 0], expected, atol=1e-12)
@@ -37,7 +37,7 @@ def test_ring_views_are_deterministic_and_look_at_target():
 
         expected_forward = target_np - position
         expected_forward /= np.linalg.norm(expected_forward)
-        rotation = rotation_matrix_numpy(view.orientation)
+        rotation = rotation_matrix(view.orientation)
         np.testing.assert_allclose(rotation[:, 0], expected_forward, atol=1e-12)
 
 

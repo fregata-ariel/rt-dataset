@@ -119,6 +119,17 @@ PYTHONPATH=./src uv run python -m plateau_rt.cli.main rf-camera SCENE.xml OUT \
   --synthetic-array
 ```
 
+Post-process an existing output directory. These stages are CPU-only and do
+not load Sionna:
+
+```bash
+PYTHONPATH=./src uv run python -m plateau_rt.cli.main rf-camera-calibrate OUT --phase-floor-db -35
+PYTHONPATH=./src uv run python -m plateau_rt.cli.main rf-camera-delay OUT --power-floor-db -35
+```
+
+The math lives in `src/plateau_rt/domain/rf_camera/` (NumPy only); the
+directory post-processing is in `src/plateau_rt/application/rf_camera_*.py`.
+
 For a high-fidelity comparison, replace `--synthetic-array` with
 `--explicit-array`. The explicit mode will be substantially more expensive.
 
@@ -191,13 +202,13 @@ The remaining sign of kx is not observable from a single planar aperture.
 
 ## Image-formation checks
 
-All calibration and delay-development tests are CPU-only:
+All calibration and delay-development tests are CPU-only and do not import
+Sionna (`tests/test_rf_camera_boundaries.py` enforces this):
 
 ```bash
-PYTHONPATH=./src uv run pytest \
-  tests/test_rf_camera_imaging.py \
-  tests/test_rf_camera_calibration.py \
-  tests/test_rf_camera_delay.py -q
+PYTHONPATH=./src uv run pytest tests -q
+# or, in the same container image as CI:
+scripts/ci/run-unit-tests.sh
 ```
 
 ## Optical reference images

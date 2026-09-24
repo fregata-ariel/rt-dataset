@@ -44,19 +44,25 @@ All eight receivers are solved in **one** Sionna `PathSolver` call.
 ## Run
 
 ```bash
-git switch feature/1bs-multiue-rf-camera-dataset
-git pull
 make rf-camera-multiview-mock
 ```
 
-CPU-only geometry/ray tests:
+or, for another scene or ring:
 
 ```bash
-PYTHONPATH=./src uv run pytest \
-  tests/test_rf_camera_imaging.py \
-  tests/test_rf_camera_calibration.py \
-  tests/test_rf_camera_delay.py \
-  tests/test_rf_camera_dataset.py -q
+PYTHONPATH=./src uv run python -m plateau_rt.cli.main rf-camera-multiview SCENE.xml OUT \
+  --num-views 8 --radius-m 30 --ue-height-m 1.5 --target 5 5 5 \
+  --bs-position -50 -50 30 --frequency-bins 64 --bandwidth-mhz 100
+```
+
+Poses and the camera model are in `src/plateau_rt/domain/rf_camera/camera.py`
+(NumPy only); Sionna tracing is in
+`src/plateau_rt/adapters/sionna/rf_camera_dataset.py`.
+
+CPU-only geometry/ray tests (no Sionna import):
+
+```bash
+PYTHONPATH=./src uv run pytest tests -q
 ```
 
 ## Expected Sionna CFR shape

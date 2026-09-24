@@ -1,9 +1,10 @@
 import numpy as np
 import pytest
 
-from plateau_rt.adapters.sionna.rf_camera_delay import (
+from plateau_rt.domain.rf_camera.delay import (
     angular_cfr_to_delay,
     circular_delay_error_s,
+    dominant_delay,
     propagating_direction_mask,
 )
 
@@ -54,3 +55,17 @@ def test_circular_delay_error_handles_wraparound():
     period = 640e-9
     assert circular_delay_error_s(630e-9, 10e-9, period) == pytest.approx(20e-9)
     assert circular_delay_error_s(250e-9, 254e-9, period) == pytest.approx(4e-9)
+
+
+def test_dominant_delay_returns_strongest_bin_per_direction():
+    power = np.zeros((2, 3, 4))
+    power[0, 1, 2] = 5.0
+    power[1, 2, 3] = 7.0
+    power[..., 0] += 1.0
+    delay_s = np.array([0.0, 10e-9, 20e-9, 30e-9])
+
+    bins, delays, peak = dominant_delay(power, delay_s)
+
+    assert bins[0, 1] == 2 and bins[1, 2] == 3 and bins[0, 0] == 0
+    assert delays[0, 1] == pytest.approx(20e-9)
+    np.testing.assert_array_equal(peak, power.max(axis=-1))

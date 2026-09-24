@@ -30,13 +30,13 @@ rf-camera-mock: build-mock
 	$(PYTHON) -m plateau_rt.cli.main rf-camera $(MOCK_XML) $(RF_CAMERA_OUT)
 
 rf-camera-calibrate-mock:
-	$(PYTHON) -m plateau_rt.adapters.sionna.rf_camera_calibration $(RF_CAMERA_OUT)
+	$(PYTHON) -m plateau_rt.cli.main rf-camera-calibrate $(RF_CAMERA_OUT)
 
 rf-camera-delay-mock:
-	$(PYTHON) -m plateau_rt.adapters.sionna.rf_camera_delay $(RF_CAMERA_OUT)
+	$(PYTHON) -m plateau_rt.cli.main rf-camera-delay $(RF_CAMERA_OUT)
 
 rf-camera-multiview-mock: build-mock
-	$(PYTHON) -m plateau_rt.adapters.sionna.rf_camera_dataset $(MOCK_XML) $(RF_CAMERA_MULTIVIEW_OUT) \
+	$(PYTHON) -m plateau_rt.cli.main rf-camera-multiview $(MOCK_XML) $(RF_CAMERA_MULTIVIEW_OUT) \
 		--num-views 8 --radius-m 30 --ue-height-m 1.5 --target 5 5 5
 
 clean:

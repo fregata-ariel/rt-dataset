@@ -1,11 +1,12 @@
 import numpy as np
 
-from plateau_rt.adapters.sionna.rf_camera import aperture_to_angular_fft
-from plateau_rt.adapters.sionna.rf_camera_calibration import (
+from plateau_rt.domain.rf_camera.calibration import (
     angular_peak_projection,
     calibrate_angular_cfr,
+    direction_cosine_axes,
     geometric_los_source_direction_local,
 )
+from plateau_rt.domain.rf_camera.imaging import aperture_to_angular_fft
 
 
 def test_calibration_recovers_physical_direction_and_phase_origin():
@@ -63,3 +64,24 @@ def test_default_geometry_los_direction_matches_expected_projection():
         [-0.65583994, -0.65583994, 0.37382877],
         atol=1e-7,
     )
+
+
+def test_calibrated_axes_increase_toward_local_plus_y_and_plus_z():
+    ky, kz = direction_cosine_axes(
+        fft_rows=16,
+        fft_cols=32,
+        horizontal_spacing_lambda=0.5,
+        vertical_spacing_lambda=0.25,
+    )
+    calibrated = calibrate_angular_cfr(
+        np.zeros((16, 32, 1), dtype=np.complex64),
+        aperture_rows=4,
+        aperture_cols=8,
+        horizontal_spacing_lambda=0.5,
+        vertical_spacing_lambda=0.25,
+    )
+
+    np.testing.assert_array_equal(calibrated.ky_over_k, ky)
+    np.testing.assert_array_equal(calibrated.kz_over_k, kz)
+    assert np.all(np.diff(ky) > 0) and np.all(np.diff(kz) > 0)
+    assert ky.shape == (32,) and kz.shape == (16,)

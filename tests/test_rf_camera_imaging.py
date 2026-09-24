@@ -1,21 +1,21 @@
 import numpy as np
 
-from plateau_rt.adapters.sionna.rf_camera import (
-    _frequency_offsets,
-    _reshape_planar_column_first,
+from plateau_rt.domain.rf_camera.imaging import (
     aperture_to_angular_fft,
+    frequency_offsets,
+    reshape_planar_column_first,
 )
 
 
 def test_frequency_offsets_are_centered_on_dc():
-    offsets = _frequency_offsets(100e6, 4)
+    offsets = frequency_offsets(100e6, 4)
     np.testing.assert_allclose(offsets, [-50e6, -25e6, 0.0, 25e6])
 
 
 def test_planar_array_column_first_numbering_is_restored():
     # Sionna PlanarArray numbers all rows in column 0 first, then column 1.
     flat = np.arange(6, dtype=np.float32)[:, None]
-    aperture = _reshape_planar_column_first(flat, rows=3, cols=2)
+    aperture = reshape_planar_column_first(flat, rows=3, cols=2)
 
     expected = np.array(
         [

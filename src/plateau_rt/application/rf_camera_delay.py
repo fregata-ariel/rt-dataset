@@ -1,139 +1,29 @@
-"""Develop calibrated angular CFR into an angle-delay RF volume.
+"""Develop a calibrated RF-camera output directory into an angle-delay volume.
 
-This is a CPU-only post-processing stage. It takes the physically calibrated
-complex angular CFR produced by :mod:`rf_camera_calibration` and performs an
-IFFT along the uniformly sampled baseband-frequency axis.
-
-The resulting tensor keeps complex phase and has axes
-
-    [UE-local kz/k, UE-local ky/k, delay]
-
-so delay bins can later be treated as image channels or as a small RF volume.
+Reads ``angular_cfr_calibrated.npy`` (from ``rf-camera-calibrate``) and the
+metadata, applies :func:`plateau_rt.domain.rf_camera.delay.angular_cfr_to_delay`
+and writes the angle-delay CIR, diagnostic images and
+``angle_delay_report.json``.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
-from plateau_rt.adapters.sionna.rf_camera_calibration import (
+from plateau_rt.domain.rf_camera.calibration import (
+    direction_cosine_axes,
     geometric_los_source_direction_local,
 )
-
-SPEED_OF_LIGHT_M_S = 299_792_458.0
-
-
-@dataclass(frozen=True)
-class AngularDelayVolume:
-    """Complex angle-delay response and its physical axes."""
-
-    cir: np.ndarray
-    delay_s: np.ndarray
-    frequency_spacing_hz: float
-    unambiguous_delay_s: float
-
-
-def angular_cfr_to_delay(
-    angular_cfr: np.ndarray,
-    frequency_offsets_hz: np.ndarray,
-) -> AngularDelayVolume:
-    """IFFT a centered, uniformly sampled CFR into positive modulo-delay bins.
-
-    ``frequency_offsets_hz`` is expected to contain the baseband offsets used
-    for ``Paths.cfr()``, ordered from negative to positive frequency. The
-    resulting delay axis starts at zero and spans one unambiguous delay period
-    ``1 / delta_f``. Absolute Sionna delays therefore appear modulo this period.
-    """
-    cfr = np.asarray(angular_cfr)
-    frequencies = np.asarray(frequency_offsets_hz, dtype=np.float64)
-
-    if cfr.ndim != 3:
-        raise ValueError("angular_cfr must have shape [kz, ky, frequency]")
-    if frequencies.ndim != 1 or frequencies.size != cfr.shape[-1]:
-        raise ValueError("frequency_offsets_hz must match the CFR frequency axis")
-    if frequencies.size < 2:
-        raise ValueError("at least two frequency bins are required for delay imaging")
-
-    order = np.argsort(frequencies)
-    frequencies = frequencies[order]
-    cfr = cfr[..., order]
-
-    differences = np.diff(frequencies)
-    delta_f = float(np.median(differences))
-    if delta_f <= 0.0:
-        raise ValueError("frequency offsets must contain distinct increasing bins")
-    if not np.allclose(differences, delta_f, rtol=1e-6, atol=max(1e-3, abs(delta_f) * 1e-9)):
-        raise ValueError("frequency offsets must be uniformly spaced")
-
-    # The stored frequency axis is centered as [-B/2, ..., 0, ..., +B/2).
-    # Move DC to index zero before using NumPy's inverse DFT convention.
-    cir = np.fft.ifft(np.fft.ifftshift(cfr, axes=-1), axis=-1)
-
-    num_bins = frequencies.size
-    delay_resolution_s = 1.0 / (num_bins * delta_f)
-    delay_s = np.arange(num_bins, dtype=np.float64) * delay_resolution_s
-
-    return AngularDelayVolume(
-        cir=cir,
-        delay_s=delay_s,
-        frequency_spacing_hz=delta_f,
-        unambiguous_delay_s=1.0 / delta_f,
-    )
-
-
-def direction_axes_from_metadata(
-    *,
-    fft_rows: int,
-    fft_cols: int,
-    horizontal_spacing_lambda: float,
-    vertical_spacing_lambda: float,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Reconstruct calibrated UE-local ``ky/k`` and ``kz/k`` axes."""
-    q_col = np.fft.fftshift(np.fft.fftfreq(fft_cols))
-    q_row = np.fft.fftshift(np.fft.fftfreq(fft_rows))
-    ky_over_k = q_col / horizontal_spacing_lambda
-    kz_over_k = -q_row[::-1] / vertical_spacing_lambda
-    return ky_over_k, kz_over_k
-
-
-def propagating_direction_mask(
-    ky_over_k: np.ndarray,
-    kz_over_k: np.ndarray,
-    *,
-    tolerance: float = 1e-12,
-) -> np.ndarray:
-    """Return the far-field propagating disk for a planar y-z aperture.
-
-    A real plane-wave direction must satisfy ``kx^2 + ky^2 + kz^2 = 1``.
-    The planar aperture does not determine the sign of ``kx`` but it does
-    determine whether a sampled y-z projection can correspond to a propagating
-    wave at all.
-    """
-    ky = np.asarray(ky_over_k, dtype=np.float64)[None, :]
-    kz = np.asarray(kz_over_k, dtype=np.float64)[:, None]
-    return ky**2 + kz**2 <= 1.0 + tolerance
-
-
-def geometric_los_delay_s(
-    tx_position: tuple[float, float, float],
-    ue_position: tuple[float, float, float],
-) -> float:
-    """Free-space geometric delay from BS to UE aperture center."""
-    tx = np.asarray(tx_position, dtype=np.float64)
-    ue = np.asarray(ue_position, dtype=np.float64)
-    return float(np.linalg.norm(tx - ue) / SPEED_OF_LIGHT_M_S)
-
-
-def circular_delay_error_s(value: float, reference: float, period: float) -> float:
-    """Shortest delay error on a modulo-delay circle."""
-    if period <= 0.0:
-        raise ValueError("period must be > 0")
-    difference = abs((value - reference) % period)
-    return float(min(difference, period - difference))
+from plateau_rt.domain.rf_camera.delay import (
+    angular_cfr_to_delay,
+    circular_delay_error_s,
+    dominant_delay,
+    geometric_los_delay_s,
+    propagating_direction_mask,
+)
 
 
 def _earliest_path_delay(path_gt_path: Path) -> float | None:
@@ -174,7 +64,7 @@ def develop_angle_delay(
     frequency_offsets_hz = np.asarray(metadata["frequency_offsets_hz"], dtype=np.float64)
 
     volume = angular_cfr_to_delay(cfr, frequency_offsets_hz)
-    ky_over_k, kz_over_k = direction_axes_from_metadata(
+    ky_over_k, kz_over_k = direction_cosine_axes(
         fft_rows=cfr.shape[0],
         fft_cols=cfr.shape[1],
         horizontal_spacing_lambda=float(cfg["horizontal_spacing_lambda"]),
@@ -229,7 +119,7 @@ def develop_angle_delay(
     print("=== RF Camera angle-delay development ===")
     print(
         f"frequency spacing={volume.frequency_spacing_hz / 1e3:.3f} kHz, "
-        f"delay resolution={1e9 / (len(volume.delay_s) * volume.frequency_spacing_hz):.3f} ns, "
+        f"delay resolution={volume.delay_resolution_s * 1e9:.3f} ns, "
         f"unambiguous delay={volume.unambiguous_delay_s * 1e9:.3f} ns"
     )
     print(
@@ -316,10 +206,9 @@ def develop_angle_delay(
     fig.savefig(delay_profile_png, dpi=150)
     plt.close(fig)
 
-    per_direction_peak = np.max(power, axis=2)
+    _, dominant_delay_s, per_direction_peak = dominant_delay(power, volume.delay_s)
     per_direction_db = 10.0 * np.log10(np.maximum(per_direction_peak / global_peak_power, 1e-12))
-    dominant_delay_bin = np.argmax(power, axis=2)
-    dominant_delay_ns = volume.delay_s[dominant_delay_bin] * 1e9
+    dominant_delay_ns = dominant_delay_s * 1e9
     dominant_mask = physical_mask & (per_direction_db >= power_floor_db)
     dominant_delay_plot = np.ma.masked_where(~dominant_mask, dominant_delay_ns)
 
@@ -351,7 +240,7 @@ def develop_angle_delay(
         "axis_order": ["kz_over_k", "ky_over_k", "delay"],
         "shape": list(volume.cir.shape),
         "frequency_spacing_hz": volume.frequency_spacing_hz,
-        "delay_resolution_s": float(1.0 / (len(volume.delay_s) * volume.frequency_spacing_hz)),
+        "delay_resolution_s": float(volume.delay_resolution_s),
         "unambiguous_delay_s": volume.unambiguous_delay_s,
         "delay_convention": "positive absolute propagation delay modulo 1/delta_f",
         "geometric_los": {
@@ -410,22 +299,3 @@ def develop_angle_delay(
         "dominant_delay_png": dominant_delay_png,
         "report": report_path,
     }
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Develop a calibrated RF-camera CFR into an angle-delay volume"
-    )
-    parser.add_argument("output_dir", type=Path, help="Existing rf_camera output directory")
-    parser.add_argument(
-        "--power-floor-db",
-        type=float,
-        default=-35.0,
-        help="Mask dominant-delay visualization below this relative peak power",
-    )
-    args = parser.parse_args()
-    develop_angle_delay(args.output_dir, power_floor_db=args.power_floor_db)
-
-
-if __name__ == "__main__":
-    main()

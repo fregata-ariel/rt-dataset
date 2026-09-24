@@ -17,6 +17,12 @@ from typing import Any
 import numpy as np
 from sionna.rt import PathSolver, PlanarArray, Receiver, Transmitter, load_scene
 
+from plateau_rt.domain.rf_camera.imaging import (
+    aperture_to_angular_fft,
+    frequency_offsets,
+    reshape_planar_column_first,
+)
+
 
 @dataclass(frozen=True)
 class RFCameraConfig:
@@ -144,7 +150,7 @@ class RFCameraMVP:
         # Paths.cfr() operates on baseband frequency offsets around the scene's
         # carrier. Keeping the carrier in scene.frequency avoids applying the
         # carrier propagation phase a second time.
-        frequency_offsets_hz = _frequency_offsets(cfg.bandwidth_hz, cfg.num_frequency_bins)
+        frequency_offsets_hz = frequency_offsets(cfg.bandwidth_hz, cfg.num_frequency_bins)
         cfr = np.asarray(
             paths.cfr(
                 frequencies=frequency_offsets_hz,
@@ -166,7 +172,7 @@ class RFCameraMVP:
 
         # [num_rx, num_rx_ant, num_tx, num_tx_ant, time, frequency]
         aperture_flat = cfr[0, :, 0, 0, 0, :]
-        aperture_cfr = _reshape_planar_column_first(
+        aperture_cfr = reshape_planar_column_first(
             aperture_flat,
             rows=cfg.rx_rows,
             cols=cfg.rx_cols,
@@ -271,61 +277,6 @@ class RFCameraMVP:
             except Exception as exc:  # pragma: no cover - depends on Sionna backend
                 print(f"Warning: could not export paths.{name}: {exc}")
         np.savez_compressed(output_path, **payload)
-
-
-def _frequency_offsets(bandwidth_hz: float, num_bins: int) -> np.ndarray:
-    """Return evenly spaced baseband offsets centered on DC."""
-    if num_bins == 1:
-        return np.array([0.0], dtype=np.float32)
-    # Endpoint=False gives a regular FFT/OFDM-like grid centered around DC.
-    spacing = bandwidth_hz / num_bins
-    indices = np.arange(num_bins, dtype=np.float64) - num_bins // 2
-    return (indices * spacing).astype(np.float32)
-
-
-def _reshape_planar_column_first(
-    aperture_flat: np.ndarray,
-    *,
-    rows: int,
-    cols: int,
-) -> np.ndarray:
-    """Restore Sionna PlanarArray's column-first antenna numbering.
-
-    `aperture_flat` has shape [rx_ant, ...]. Antenna indices walk down all
-    rows of the first column before moving to the next column.
-    """
-    aperture_flat = np.asarray(aperture_flat)
-    if aperture_flat.shape[0] != rows * cols:
-        raise ValueError(f"Expected {rows * cols} antenna samples, got {aperture_flat.shape[0]}")
-
-    out = np.empty((rows, cols) + aperture_flat.shape[1:], dtype=aperture_flat.dtype)
-    for antenna_index in range(rows * cols):
-        row = antenna_index % rows
-        col = antenna_index // rows
-        out[row, col, ...] = aperture_flat[antenna_index, ...]
-    return out
-
-
-def aperture_to_angular_fft(
-    aperture_cfr: np.ndarray,
-    *,
-    fft_rows: int,
-    fft_cols: int,
-) -> np.ndarray:
-    """Create a first-look angular spectrum by spatial FFT of the UE aperture.
-
-    The receive aperture is the local y-z plane. The returned image is kept in
-    spatial-frequency coordinates for this milestone; conversion to calibrated
-    AoA angles belongs to the next image-formation step.
-    """
-    aperture_cfr = np.asarray(aperture_cfr)
-    if aperture_cfr.ndim != 3:
-        raise ValueError("aperture_cfr must have shape [row, col, frequency]")
-    if fft_rows < aperture_cfr.shape[0] or fft_cols < aperture_cfr.shape[1]:
-        raise ValueError("FFT grid must not be smaller than aperture")
-
-    spectrum = np.fft.fft2(aperture_cfr, s=(fft_rows, fft_cols), axes=(0, 1))
-    return np.fft.fftshift(spectrum, axes=(0, 1))
 
 
 def _render_debug_images(

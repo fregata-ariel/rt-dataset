@@ -10,7 +10,6 @@ regenerated without re-running Sionna RT.
 
 from __future__ import annotations
 
-import argparse
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -19,30 +18,22 @@ from typing import Any
 import numpy as np
 from sionna.rt import PathSolver, PlanarArray, Receiver, Transmitter, load_scene
 
-from plateau_rt.adapters.sionna.rf_camera import (
-    _frequency_offsets,
-    _reshape_planar_column_first,
-    aperture_to_angular_fft,
-)
-from plateau_rt.adapters.sionna.rf_camera_calibration import (
+from plateau_rt.domain.rf_camera.calibration import (
     calibrate_angular_cfr,
-    rotation_matrix_numpy,
+    geometric_los_source_direction_local,
 )
-from plateau_rt.adapters.sionna.rf_camera_delay import (
-    angular_cfr_to_delay,
-    direction_axes_from_metadata,
-    propagating_direction_mask,
+from plateau_rt.domain.rf_camera.camera import (
+    PROJECTION,
+    RFViewSpec,
+    build_direction_cosine_camera_model,
+    view_pose_payload,
 )
-
-
-@dataclass(frozen=True)
-class RFViewSpec:
-    """One RF-camera pose."""
-
-    view_id: str
-    position: tuple[float, float, float]
-    look_at: tuple[float, float, float]
-    orientation: tuple[float, float, float]
+from plateau_rt.domain.rf_camera.delay import angular_cfr_to_delay, dominant_delay
+from plateau_rt.domain.rf_camera.imaging import (
+    aperture_to_angular_fft,
+    frequency_offsets,
+    reshape_planar_column_first,
+)
 
 
 @dataclass(frozen=True)
@@ -85,109 +76,6 @@ class RFMultiViewConfig:
             raise ValueError("antenna spacing must be > 0")
         if self.fft_rows < self.rx_rows or self.fft_cols < self.rx_cols:
             raise ValueError("FFT grid must not be smaller than the receive aperture")
-
-
-def look_at_orientation(
-    position: tuple[float, float, float],
-    target: tuple[float, float, float],
-) -> tuple[float, float, float]:
-    """Return Sionna Euler angles whose local +x points at ``target``."""
-
-    p = np.asarray(position, dtype=np.float64)
-    t = np.asarray(target, dtype=np.float64)
-    direction = t - p
-    distance = float(np.linalg.norm(direction))
-    if distance == 0.0:
-        raise ValueError("position and look-at target must differ")
-    direction /= distance
-
-    theta = float(np.arccos(np.clip(direction[2], -1.0, 1.0)))
-    phi = float(np.arctan2(direction[1], direction[0]))
-    return (phi, theta - np.pi / 2.0, 0.0)
-
-
-def generate_ring_views(
-    *,
-    target: tuple[float, float, float],
-    radius_m: float,
-    ue_height_m: float,
-    num_views: int,
-    start_azimuth_deg: float = 0.0,
-) -> list[RFViewSpec]:
-    """Generate deterministic RF-camera poses around a target."""
-
-    if radius_m <= 0.0:
-        raise ValueError("radius_m must be > 0")
-    if num_views < 1:
-        raise ValueError("num_views must be >= 1")
-
-    target_arr = np.asarray(target, dtype=np.float64)
-    start = np.deg2rad(start_azimuth_deg)
-    views: list[RFViewSpec] = []
-    for index in range(num_views):
-        azimuth = start + 2.0 * np.pi * index / num_views
-        position = (
-            float(target_arr[0] + radius_m * np.cos(azimuth)),
-            float(target_arr[1] + radius_m * np.sin(azimuth)),
-            float(ue_height_m),
-        )
-        orientation = look_at_orientation(position, target)
-        views.append(
-            RFViewSpec(
-                view_id=f"ue_{index:06d}",
-                position=position,
-                look_at=tuple(float(v) for v in target),
-                orientation=orientation,
-            )
-        )
-    return views
-
-
-def build_direction_cosine_camera_model(
-    *,
-    fft_rows: int,
-    fft_cols: int,
-    horizontal_spacing_lambda: float,
-    vertical_spacing_lambda: float,
-) -> dict[str, np.ndarray]:
-    """Build front-hemisphere local rays for the direction-cosine image."""
-
-    ky, kz = direction_axes_from_metadata(
-        fft_rows=fft_rows,
-        fft_cols=fft_cols,
-        horizontal_spacing_lambda=horizontal_spacing_lambda,
-        vertical_spacing_lambda=vertical_spacing_lambda,
-    )
-    valid = propagating_direction_mask(ky, kz)
-
-    ky_grid = np.broadcast_to(ky[None, :], (fft_rows, fft_cols))
-    kz_grid = np.broadcast_to(kz[:, None], (fft_rows, fft_cols))
-    kx_sq = 1.0 - ky_grid**2 - kz_grid**2
-    kx = np.sqrt(np.maximum(kx_sq, 0.0))
-
-    rays = np.stack([kx, ky_grid, kz_grid], axis=-1).astype(np.float32)
-    rays[~valid] = 0.0
-
-    return {
-        "ray_directions_local": rays,
-        "valid_mask": valid.astype(bool),
-        "ky_over_k": ky.astype(np.float32),
-        "kz_over_k": kz.astype(np.float32),
-    }
-
-
-def _view_pose_payload(view: RFViewSpec) -> dict[str, Any]:
-    rotation = rotation_matrix_numpy(view.orientation)
-    return {
-        "view_id": view.view_id,
-        "position_m": list(view.position),
-        "look_at_m": list(view.look_at),
-        "orientation_rad": list(view.orientation),
-        "world_from_local_rotation": rotation.tolist(),
-        "camera_forward_axis_local": [1.0, 0.0, 0.0],
-        "camera_forward_world": rotation[:, 0].tolist(),
-        "projection": "front_hemisphere_direction_cosine",
-    }
 
 
 def _save_path_geometry_gt(paths: Any, output_path: Path) -> None:
@@ -323,7 +211,7 @@ class RFMultiViewDataset:
             seed=cfg.seed,
         )
 
-        frequency_offsets_hz = _frequency_offsets(
+        frequency_offsets_hz = frequency_offsets(
             cfg.bandwidth_hz,
             cfg.num_frequency_bins,
         )
@@ -385,14 +273,14 @@ class RFMultiViewDataset:
             rf_dir = view_dir / "rf"
             rf_dir.mkdir(parents=True, exist_ok=True)
 
-            pose_payload = _view_pose_payload(view)
+            pose_payload = view_pose_payload(view)
             (view_dir / "pose.json").write_text(
                 json.dumps(pose_payload, indent=2),
                 encoding="utf-8",
             )
 
             aperture_flat = cfr[view_index, :, 0, 0, 0, :]
-            aperture_cfr = _reshape_planar_column_first(
+            aperture_cfr = reshape_planar_column_first(
                 aperture_flat,
                 rows=cfg.rx_rows,
                 cols=cfg.rx_cols,
@@ -436,14 +324,10 @@ class RFMultiViewDataset:
                 calibration.cfr,
                 frequency_offsets_hz,
             )
-            delay_power = np.abs(delay_volume.cir) ** 2
-            dominant_index = np.argmax(delay_power, axis=-1)
-            dominant_delay_s = delay_volume.delay_s[dominant_index]
-            dominant_power = np.take_along_axis(
-                delay_power,
-                dominant_index[..., None],
-                axis=-1,
-            )[..., 0]
+            _, dominant_delay_s, dominant_power = dominant_delay(
+                np.abs(delay_volume.cir) ** 2,
+                delay_volume.delay_s,
+            )
 
             dominant_delay_s = dominant_delay_s.astype(np.float32)
             dominant_delay_s[~valid_ray_mask] = np.nan
@@ -461,12 +345,11 @@ class RFMultiViewDataset:
                 valid_mask=valid_ray_mask,
             )
 
-            rotation = rotation_matrix_numpy(view.orientation)
-            bs_world = np.asarray(cfg.tx_position, dtype=np.float64) - np.asarray(
-                view.position, dtype=np.float64
+            bs_local = geometric_los_source_direction_local(
+                tx_position=cfg.tx_position,
+                ue_position=view.position,
+                ue_orientation=view.orientation,
             )
-            bs_world /= np.linalg.norm(bs_world)
-            bs_local = rotation.T @ bs_world
 
             manifest_views.append(
                 {
@@ -513,7 +396,7 @@ class RFMultiViewDataset:
             "delay_resolution_s": 1.0 / cfg.bandwidth_hz,
             "unambiguous_delay_s": unambiguous_delay_s,
             "camera_model": {
-                "projection": "front_hemisphere_direction_cosine",
+                "projection": PROJECTION,
                 "forward_axis_local": "+x",
                 "array_plane_local": "y-z",
                 "ray_directions": camera_model_path.name,
@@ -535,55 +418,3 @@ class RFMultiViewDataset:
         print(f"camera model: {camera_model_path}")
         print(f"path geometry GT: {path_gt_path}")
         return manifest_path
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate a 1-BS / multi-UE RF-camera dataset")
-    parser.add_argument("xml_file", type=Path)
-    parser.add_argument("output_dir", type=Path)
-    parser.add_argument("--num-views", type=int, default=8)
-    parser.add_argument("--radius-m", type=float, default=30.0)
-    parser.add_argument("--ue-height-m", type=float, default=1.5)
-    parser.add_argument("--target", type=float, nargs=3, default=(5.0, 5.0, 5.0))
-    parser.add_argument(
-        "--bs-position",
-        type=float,
-        nargs=3,
-        default=(-50.0, -50.0, 30.0),
-    )
-    parser.add_argument("--carrier-ghz", type=float, default=3.5)
-    parser.add_argument("--bandwidth-mhz", type=float, default=100.0)
-    parser.add_argument("--frequency-bins", type=int, default=64)
-    parser.add_argument("--rx-rows", type=int, default=8)
-    parser.add_argument("--rx-cols", type=int, default=8)
-    parser.add_argument("--max-depth", type=int, default=5)
-    parser.add_argument(
-        "--explicit-array",
-        action="store_true",
-        help="Trace each antenna element explicitly instead of synthetic-array mode",
-    )
-    args = parser.parse_args()
-
-    target = tuple(float(v) for v in args.target)
-    views = generate_ring_views(
-        target=target,
-        radius_m=args.radius_m,
-        ue_height_m=args.ue_height_m,
-        num_views=args.num_views,
-    )
-    config = RFMultiViewConfig(
-        carrier_frequency_hz=args.carrier_ghz * 1e9,
-        bandwidth_hz=args.bandwidth_mhz * 1e6,
-        num_frequency_bins=args.frequency_bins,
-        tx_position=tuple(float(v) for v in args.bs_position),
-        tx_look_at=target,
-        rx_rows=args.rx_rows,
-        rx_cols=args.rx_cols,
-        max_depth=args.max_depth,
-        synthetic_array=not args.explicit_array,
-    )
-    RFMultiViewDataset(args.xml_file, views=views, config=config).run(args.output_dir)
-
-
-if __name__ == "__main__":
-    main()
