@@ -11,6 +11,7 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.domain.rf_camera.optical",
     "plateau_rt.application.rf_camera_calibration",
     "plateau_rt.application.rf_camera_delay",
+    "plateau_rt.application.optical_reference",
 ]
 
 

@@ -60,10 +60,14 @@ the raw aperture CFR is kept unweighted.
 
 ## Mock geometry
 
-The included mock building occupies `[0,10] x [0,10] x [0,10]` m. The smoke
-test uses:
+The included mock building's CityJSON vertices span `[0,10] x [0,10] x [0,10]`
+m, but the scene builder recenters `x`/`y` on the bounding-box centre and
+keeps `z` from its minimum (`src/plateau_rt/adapters/plateau/cityjson_parser.py`),
+so in scene coordinates the building occupies `x, y in [-5, 5]`, `z in [0, 10]`
+m. The smoke test uses:
 
-- target / look-at: `(5, 5, 5)` m
+- target / look-at: `(5, 5, 5)` m -- this sits on the building's `+x +y`
+  vertical edge (`x = y = 5`, mid-height), not its centre
 - 8 UE views on a 30 m radius ring
 - UE height: 1.5 m
 - one BS at `(-50, -50, 30)` m
@@ -159,6 +163,13 @@ The full `[kz, ky, frequency]` or `[kz, ky, delay]` volume is intentionally not
 stored for every production view. This avoids a large storage multiplier while
 keeping all information needed to regenerate it.
 
+## Optical reference renders
+
+`rf-camera-optical` adds a co-registered optical render (pinhole photo/depth
+and a render on this dataset's hemisphere grid) to every view -- a reference
+for debugging and for a parallel optical Gaussian-Splatting dataset, not an
+RF training target. See [docs/optical_reference.md](optical_reference.md).
+
 ## Camera model file
 
 `camera_model.npz` contains:
@@ -226,6 +237,5 @@ observations.
 - 2+ BS illumination axes
 - chunk/resume
 - train/val/test split
-- optical co-registered reference render (tracked in issue #11)
 - explicit 3DGS training target normalization
 - receiver oscillator / CFO / phase-noise corruption

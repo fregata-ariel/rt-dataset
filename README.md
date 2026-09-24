@@ -18,6 +18,8 @@ CityJSON ──build──▶ PLY + Mitsuba XML + manifest.json
                       │                                └ rf-camera-delay ───▶ 角度-遅延ボリューム
                       │
                       └─ rf-camera-multiview ──▶ views/*/rf/ + camera_model.npz + dataset_manifest.json
+                                                    │
+                                                    └─ rf-camera-optical ──▶ views/*/optical/ + transforms.json
 ```
 
 ## 環境構築
@@ -74,6 +76,7 @@ VS Code で「Dev Containers: Reopen in Container」を実行すると、dev イ
 | `make rf-camera-calibrate-mock` | 角度画像の物理校正 (GPU 不要) |
 | `make rf-camera-delay-mock` | 角度-遅延ボリュームへの展開 (GPU 不要) |
 | `make rf-camera-multiview-mock` | 1 BS / 8 UE のマルチビューデータセット |
+| `make rf-camera-optical-mock` | マルチビューデータセットに光学参照レンダーを追加 |
 | `make clean` | 生成物の削除 |
 
 ### CLI
@@ -92,12 +95,14 @@ PYTHONPATH=./src python -m plateau_rt.cli.main --help
 | `rf-camera-calibrate DIR` | `rf-camera` の出力を物理座標に校正 |
 | `rf-camera-delay DIR` | 校正済み出力を角度-遅延ボリュームに展開 |
 | `rf-camera-multiview XML OUTPUT_DIR` | リング配置の multi-UE データセット |
+| `rf-camera-optical DATASET_DIR` | マルチビューデータセットに位置合わせ済みの光学参照レンダーを追加 |
 
 各オプションは `--help` を参照してください。RF カメラの観測モデル・座標系・出力形式は
 次のドキュメントにまとめています。
 
 - [docs/rf_camera_mvp.md](docs/rf_camera_mvp.md): 1 BS / 1 UE、校正、角度-遅延
 - [docs/rf_camera_multiview.md](docs/rf_camera_multiview.md): マルチビューデータセットとカメラモデル
+- [docs/optical_reference.md](docs/optical_reference.md): 光学参照レンダー (issue #11)、3DGS 学習との接続
 
 ## コード構成
 
@@ -110,10 +115,12 @@ src/plateau_rt/
       calibration.py         角度画像の物理校正、方向余弦軸、回転、LoS 方向
       delay.py               角度-遅延 IFFT、伝搬可能方向マスク、支配遅延
       camera.py              視点 (リング配置・look-at) と方向余弦カメラモデル
+      optical.py             光学参照レンダーのピンホールカメラ数式 (NumPy のみ)
   application/
     build_scene.py         CityJSON → シーン生成パイプライン
     rf_camera_calibration.py, rf_camera_delay.py
                            RF カメラ出力ディレクトリの後処理 (GPU 不要)
+    optical_reference.py   光学参照レンダーの生成 (rf-camera-optical、GPU 不要)
     viewer.py              カバレッジ結果ビューア
   adapters/
     plateau/               CityJSON パーサ
@@ -122,6 +129,7 @@ src/plateau_rt/
       rf_tracing.py          RF カメラ共通: アレイ設定、PathSolver、開口 CFR 抽出
       rf_camera.py           1 BS / 1 UE MVP
       rf_camera_dataset.py   1 BS / multi-UE データセット
+      optical_render.py      Mitsuba によるレイ単位の光学レンダラー
     plotting/              RF カメラ診断画像 (matplotlib)
   cli/main.py              click CLI
 ```

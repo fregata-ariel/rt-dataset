@@ -28,11 +28,17 @@ git push origin milestone/1bs-multiue-rf-camera-dataset
 2. 既存のインフラ統合テスト (compose の `test` サービス: Sionna-RT の CPU/LLVM サブセット)
 3. Sionna-RT 本体 (`third_party/sionna-rt/test/unit`) の全ユニットテストを GPU で実行
 4. Makefile のモックターゲットによる End-to-End 実行
-   (`run-all-mock render-mock rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock rf-camera-multiview-mock`)
+   (`run-all-mock render-mock rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock rf-camera-multiview-mock rf-camera-optical-mock`)
 5. `scripts/ci/check_mock_outputs.py` による生成物の検証
    - ファイルの有無、配列の形状・有限性
    - 校正後の角度ピークと幾何 LoS 方向の誤差 ≤ 0.05
    - 最強ボクセルの遅延と LoS 遅延の誤差 ≤ 遅延分解能 (10 ns)
+   - 光学参照レンダー (pinhole/hemisphere) のファイル・形状・`transforms.json`、
+     mock ボックスとの解析的な幾何整合性 (issue #11、詳細は
+     [docs/optical_reference.md](optical_reference.md))
+6. `scripts/ci/check_hemisphere_split.py` による前面/背面分割パターンの確認
+7. `scripts/ci/check_optical_render.py` による光学レイレンダラーと
+   mock ボックス形状の一致確認
 
 本番イメージには TensorFlow / JAX / PyTorch を入れていないため、Sionna-RT の
 `test_cpx_convert` のうちそれらへの変換ケースは skip されます。

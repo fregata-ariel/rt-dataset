@@ -1,4 +1,4 @@
-.PHONY: build-mock sim-mock render-mock view-mock run-all-mock rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock rf-camera-multiview-mock clean
+.PHONY: build-mock sim-mock render-mock view-mock run-all-mock rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock rf-camera-multiview-mock rf-camera-optical-mock clean
 
 # PYTHONPATHを設定
 PYTHON := PYTHONPATH=./src/ python
@@ -38,6 +38,9 @@ rf-camera-delay-mock:
 rf-camera-multiview-mock: build-mock
 	$(PYTHON) -m plateau_rt.cli.main rf-camera-multiview $(MOCK_XML) $(RF_CAMERA_MULTIVIEW_OUT) \
 		--num-views 8 --radius-m 30 --ue-height-m 1.5 --target 5 5 5
+
+rf-camera-optical-mock:
+	$(PYTHON) -m plateau_rt.cli.main rf-camera-optical $(RF_CAMERA_MULTIVIEW_OUT)
 
 clean:
 	rm -rf data/intermediate/* data/generated/*

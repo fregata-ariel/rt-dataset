@@ -191,6 +191,44 @@ def rf_camera_multiview(
     RFMultiViewDataset(xml_file, views=views, config=config).run(output_dir)
 
 
+@cli.command("rf-camera-optical")
+@click.argument("dataset_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--scene-xml",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="既定ではマニフェストの source_scene を使用",
+)
+@click.option("--width", type=int, default=512, show_default=True)
+@click.option("--height", type=int, default=512, show_default=True)
+@click.option("--fov-x-deg", type=float, default=90.0, show_default=True)
+@click.option("--spp", type=int, default=64, show_default=True)
+@click.option("--seed", type=int, default=0, show_default=True)
+def rf_camera_optical(
+    dataset_dir: Path,
+    scene_xml: Path | None,
+    width: int,
+    height: int,
+    fov_x_deg: float,
+    spp: int,
+    seed: int,
+):
+    """rf-camera-multiview の出力に位置合わせ済みの光学参照レンダーを追加します。"""
+    from plateau_rt.application.optical_reference import render_optical_references
+
+    click.echo(click.style("=== Optical reference renders ===", fg="cyan", bold=True))
+    transforms_path = render_optical_references(
+        dataset_dir,
+        scene_xml=scene_xml,
+        width=width,
+        height=height,
+        fov_x_deg=fov_x_deg,
+        spp=spp,
+        seed=seed,
+    )
+    click.echo(click.style(f"Success! transforms written to: {transforms_path}", fg="green"))
+
+
 @cli.command("render")
 @click.argument("input_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
 def render_heatmaps(input_dir: Path):
