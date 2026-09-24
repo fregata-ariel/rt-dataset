@@ -24,6 +24,9 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.application.optical_reference",
     "plateau_rt.application.scene_checks",
     "plateau_rt.application.solver_profile_report",
+    "plateau_rt.experimental.rf_scatterer_fit",
+    "plateau_rt.experimental.rf_scatterer_study",
+    "plateau_rt.experimental.compare_direct_path",
 ]
 
 
