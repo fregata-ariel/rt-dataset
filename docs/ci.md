@@ -5,7 +5,7 @@ Docker の runtime イメージを使って2種類の CI を回します。
 
 | ワークフロー | トリガー | ランナーラベル | 内容 | 目安時間 (キャッシュ有) |
 |---|---|---|---|---|
-| `Unit tests` (`unit-tests.yml`) | 全ブランチへの push (`*.md`, `docs/` のみの変更は除く)、手動 | `self-hosted, docker` | `tests/` の単体テスト (GPU不要) | 1 分未満 |
+| `Unit tests` (`unit-tests.yml`) | 全ブランチへの push (`*.md`, `docs/` のみの変更は除く)、手動 | `self-hosted, docker` | ruff (lint/format) + `tests/` の単体テスト (GPU・Sionna 不要) | 1 分未満 |
 | `Milestone heavy CI (GPU)` (`milestone-heavy.yml`) | タグ `v*` / `milestone/*` の push、手動 | `self-hosted, docker, gpu` | 単体テスト + Sionna-RT 本体テスト (CPU/GPU) + モック E2E パイプライン + 生成物検証 | 5 分前後 |
 
 ## 節目 CI の回し方
@@ -33,8 +33,12 @@ git push origin milestone/1bs-multiue-rf-camera-dataset
    - 校正後の角度ピークと幾何 LoS 方向の誤差 ≤ 0.05
    - 最強ボクセルの遅延と LoS 遅延の誤差 ≤ 遅延分解能 (10 ns)
 
-Sionna-RT の `test_cpx_convert[tf]` は、runtime イメージの TensorFlow と Dr.Jit の
-DLPack 連携がプロセスごと abort するため除外しています (本プロジェクトは TF 未使用)。
+runtime イメージには TensorFlow / JAX / PyTorch を入れていないため、Sionna-RT の
+`test_cpx_convert` のうちそれらへの変換ケースは skip されます。
+
+Sionna-RT の GPU パストレースは実行ごとに完全には再現しません (パスの順序や
+float の最下位桁が変わることがある)。そのため生成物の検証はビット一致ではなく、
+物理的な整合性で判定しています。
 
 ## ローカルでの実行
 
@@ -42,6 +46,7 @@ DLPack 連携がプロセスごと abort するため除外しています (本�
 
 ```bash
 scripts/ci/build-images.sh     # base -> builder -> runtime -> ci
+scripts/ci/run-lint.sh         # ruff check / format --check
 scripts/ci/run-unit-tests.sh   # 単体テスト
 scripts/ci/run-heavy.sh        # 節目の重い処理 (GPU)
 ```

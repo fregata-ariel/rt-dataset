@@ -12,8 +12,8 @@ dependencies = [
     "rasterio>=1.3.0",     # DEM(GeoTIFF)処理用
     "pyyaml>=6.0",
     "click>=8.1.7",        # CLI構築用
+    "matplotlib>=3.10",    # RFカメラ/カバレッジの診断画像
     "sionna-rt",
-    "tensorflow>=2.21.0",
 ]
 
 [dependency-groups]

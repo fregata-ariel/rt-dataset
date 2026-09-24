@@ -52,11 +52,10 @@ services:
       - test
     volumes:
       - ./third_party/sionna-rt/test:/test-data:ro
-    # test_cpx_convert[tf] は runtime の TensorFlow と Dr.Jit の DLPack 連携で abort するため除外 (本プロジェクトはTF未使用)
     command: >
       bash -c "uv pip install --system 'pytest>=8.0.0' && 
       cd /test-data && 
-      python -m pytest -o cache_dir=/tmp/.pytest_cache --cpu -v -k 'not (test_cpx_convert and tf)' unit/test_utils.py unit/test_hashing.py"
+      python -m pytest -o cache_dir=/tmp/.pytest_cache --cpu -v unit/test_utils.py unit/test_hashing.py"
 
   # 5. CIランナー (runtime + pytest)。チェックアウト中のワークスペースをマウントして検証する
   ci:

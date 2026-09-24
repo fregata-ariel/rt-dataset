@@ -9,8 +9,6 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
 MOCK_OUT="${CI_REPORT_DIR}/mock_results"
-# runtime の TensorFlow と Dr.Jit の DLPack 連携が abort するため除外 (本プロジェクトはTF未使用)
-SIONNA_DESELECT="not (test_cpx_convert and tf)"
 
 gpu_run() {
   docker compose --profile ci run --rm ci-gpu "$@"
@@ -29,8 +27,7 @@ docker compose --profile test run --rm test
 
 echo "🧪 Step 3: Sionna-RT unit tests (GPU)"
 docker compose --profile ci run --rm -w /workspace/third_party/sionna-rt/test ci-gpu \
-  python -m pytest -p no:cacheprovider -q -rfE --durations=10 \
-  -k "${SIONNA_DESELECT}" unit \
+  python -m pytest -p no:cacheprovider -q -rfE --durations=10 unit \
   --junitxml="/workspace/${CI_REPORT_DIR}/sionna-rt-unit-gpu.xml"
 
 echo "🏙️  Step 4: Mock end-to-end pipeline -> ${MOCK_OUT}"
