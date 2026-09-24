@@ -1,0 +1,48 @@
+# 単体テスト: push ごとに runtime イメージ上 (GPU不要) で tests/ を実行する。
+#
+# セルフホストランナー (公開リポジトリ) のため pull_request トリガーは使わない。
+# 同一リポジトリのブランチからの PR は、head コミットの push 実行結果がそのまま PR に表示される。
+name: Unit tests
+
+on:
+  push:
+    branches: ["**"]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: unit-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CUDA_ARCH: "75"
+  IMAGE_PREFIX: plateau-sionna-ci
+
+jobs:
+  unit:
+    runs-on: [self-hosted, linux, x64, docker]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Build CI images (cached)
+        run: scripts/ci/build-images.sh
+
+      - name: Unit tests
+        run: scripts/ci/run-unit-tests.sh
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-tests-report
+          path: ci-reports/unit-tests.xml
+          if-no-files-found: ignore
+          retention-days: 14

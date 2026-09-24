@@ -1,0 +1,53 @@
+# 節目 (マイルストーン) に回す重いGPU検証。
+#   - タグ push:  v*  または  milestone/*   (例: git tag milestone/1bs-multiue && git push origin milestone/1bs-multiue)
+#   - 手動実行:   Actions タブ または  gh workflow run milestone-heavy.yml --ref <branch>
+#                 (手動実行はワークフローがデフォルトブランチに入ってから有効)
+#
+# 内容は scripts/ci/run-heavy.sh を参照。生成されたモックデータセットとテスト結果を成果物として保存する。
+name: Milestone heavy CI (GPU)
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "milestone/*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# GPU は1枚なので重い処理は直列に実行し、途中キャンセルもしない
+concurrency:
+  group: milestone-heavy-gpu
+  cancel-in-progress: false
+
+env:
+  CUDA_ARCH: "75"
+  IMAGE_PREFIX: plateau-sionna-ci
+
+jobs:
+  heavy:
+    runs-on: [self-hosted, linux, x64, docker, gpu]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Build CI images (cached)
+        run: scripts/ci/build-images.sh
+
+      - name: Unit tests
+        run: scripts/ci/run-unit-tests.sh
+
+      - name: Heavy GPU checks (Sionna-RT tests + mock end-to-end pipeline)
+        run: scripts/ci/run-heavy.sh
+
+      - name: Upload reports and mock dataset
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: milestone-heavy-reports
+          path: ci-reports/
+          if-no-files-found: warn
+          retention-days: 30
