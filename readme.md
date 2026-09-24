@@ -140,6 +140,8 @@ docker compose build builder
 2. Sionna-RT のコンパイル済み Wheel が `runtime` イメージに正しくインストールされること
 3. Sionna-RT の数値計算・コアロジックのユニットテスト（30件以上）が正常にパスすること
 
+GitHub Actions（GPUノード上のセルフホストランナー）による単体テストと、節目に回す重いGPU検証については [docs/ci.md](docs/ci.md) を参照してください。
+
 -----
 
 ## 🔧 環境のカスタマイズ

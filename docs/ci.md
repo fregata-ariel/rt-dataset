@@ -1,0 +1,88 @@
+# CI (GitHub Actions セルフホストランナー)
+
+GPU ノード (RTX 2080 Ti, `CUDA_ARCH=75`) 上のセルフホストランナーで、
+Docker の runtime イメージを使って2種類の CI を回します。
+
+| ワークフロー | トリガー | ランナーラベル | 内容 | 目安時間 (キャッシュ有) |
+|---|---|---|---|---|
+| `Unit tests` (`unit-tests.yml`) | 全ブランチへの push (`*.md`, `docs/` のみの変更は除く)、手動 | `self-hosted, docker` | `tests/` の単体テスト (GPU不要) | 1 分未満 |
+| `Milestone heavy CI (GPU)` (`milestone-heavy.yml`) | タグ `v*` / `milestone/*` の push、手動 | `self-hosted, docker, gpu` | 単体テスト + Sionna-RT 本体テスト (CPU/GPU) + モック E2E パイプライン + 生成物検証 | 5 分前後 |
+
+## 節目 CI の回し方
+
+```bash
+git tag milestone/1bs-multiue-rf-camera-dataset
+git push origin milestone/1bs-multiue-rf-camera-dataset
+```
+
+または Actions タブから `Milestone heavy CI (GPU)` を手動実行します
+(手動実行は、ワークフローがデフォルトブランチ `sionna-rt` に入ってから使えます)。
+
+生成されたモックデータセット (`mock_results/`) と JUnit XML は、
+`milestone-heavy-reports` アーティファクトとして 30 日間保存されます。
+
+### 重い処理の内容 (`scripts/ci/run-heavy.sh`)
+
+1. GPU / Mitsuba `cuda_ad_mono_polarized` バリアントの確認
+2. 既存のインフラ統合テスト (compose の `test` サービス: Sionna-RT の CPU/LLVM サブセット)
+3. Sionna-RT 本体 (`third_party/sionna-rt/test/unit`) の全ユニットテストを GPU で実行
+4. Makefile のモックターゲットによる End-to-End 実行
+   (`run-all-mock render-mock rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock rf-camera-multiview-mock`)
+5. `scripts/ci/check_mock_outputs.py` による生成物の検証
+   - ファイルの有無、配列の形状・有限性
+   - 校正後の角度ピークと幾何 LoS 方向の誤差 ≤ 0.05
+   - 最強ボクセルの遅延と LoS 遅延の誤差 ≤ 遅延分解能 (10 ns)
+
+Sionna-RT の `test_cpx_convert[tf]` は、runtime イメージの TensorFlow と Dr.Jit の
+DLPack 連携がプロセスごと abort するため除外しています (本プロジェクトは TF 未使用)。
+
+## ローカルでの実行
+
+ランナーと同じスクリプトをそのまま実行できます。
+
+```bash
+scripts/ci/build-images.sh     # base -> builder -> runtime -> ci
+scripts/ci/run-unit-tests.sh   # 単体テスト
+scripts/ci/run-heavy.sh        # 節目の重い処理 (GPU)
+```
+
+CI 用イメージは `plateau-sionna-ci-*:75` という名前でビルドされ、
+開発用 / Devcontainer が参照する `plateau-sionna-*:75` は上書きしません
+(`IMAGE_PREFIX` で切り替え)。
+コンテナはランナーと同じ UID で実行されるため、ワークスペースに root 所有のファイルは残りません。
+
+## セルフホストランナー
+
+### セットアップ / 削除
+
+```bash
+scripts/ci/setup-self-hosted-runner.sh            # ダウンロード(SHA256検証) + 登録 + systemd ユーザーサービス起動
+scripts/ci/setup-self-hosted-runner.sh --remove   # サービス停止 + 登録解除
+```
+
+- 登録名: `<hostname>-gpu`、ラベル: `gpu, docker, cuda-sm75`
+- 配置先: `~/actions-runner/rt-dataset`
+- サービス: `systemctl --user status actions-runner-rt-dataset.service`
+- ログ: `journalctl --user -u actions-runner-rt-dataset.service -f`
+
+ログアウト/再起動後も常駐させるには linger を有効にします (要 sudo, 1回のみ):
+
+```bash
+sudo loginctl enable-linger "$USER"
+```
+
+### 公開リポジトリでのセキュリティ
+
+このリポジトリは公開 (public) のため、fork からの PR がセルフホストランナー上で
+任意コードを実行するリスクがあります。
+
+- ワークフローは `pull_request` トリガーを使わない (push / タグ / 手動のみ)
+- `permissions: contents: read` に限定
+- **推奨設定**: Settings → Actions → General →
+  "Fork pull request workflows from outside collaborators" を
+  **"Require approval for all external contributors"** にする。CLI の場合:
+
+  ```bash
+  gh api -X PUT repos/fregata-ariel/rt-dataset/actions/permissions/fork-pr-contributor-approval \
+    -f approval_policy=all_external_contributors
+  ```
