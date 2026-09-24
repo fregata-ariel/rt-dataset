@@ -414,6 +414,51 @@ built from `config.tx_position`/`tx_look_at` as `bs_000`, the per-view BS
 fields and derived images become that BS's entry, and `load_aperture_cfr`
 adds the leading `bs` axis. Unknown extra keys are ignored.
 
+## Observed receiver impairments (`rf-camera-observe`)
+
+`rf-camera-observe` turns the ideal, two-hemisphere, multi-BS aperture CFR into
+a single-channel *observed* CFR per `(view, BS)` pair, as a CPU (NumPy-only)
+post-processing step. It applies, in this fixed order:
+
+1. `front + g * back`, collapsing the two hemispheres with the front-to-back
+   gain `g` (`--front-to-back-db`, `None` = ideal front-only receiver);
+2. a per-element complex gain error, constant over frequency;
+3. a timing ramp `exp(-1j * 2*pi * f * tau)`, with `tau` the fixed
+   `--timing-offset-ns` plus a per-link Gaussian extra;
+4. a common phase `exp(1j * phi)`, either fixed (`--common-phase-deg`) or drawn
+   uniformly per link (`--random-common-phase`);
+5. circular complex AWGN.
+
+The impairment split follows the physical entities: the per-element gain/phase
+error is a property of the UE receive array and is drawn **once per view**,
+shared by all of that view's BSs; the timing offset, common phase and noise
+belong to each **`(UE, BS)` link** and are drawn independently per pair.
+
+Noise is one **dataset-wide floor**, not one per view. `--snr-db X` is relative
+to the dataset reference power `P_ref`, the maximum over all `(view, BS)` pairs
+of the ideal isotropic mean power `mean(|front + back|^2)`; the resolved complex
+noise variance is `P_ref / 10**(X/10)`. Path loss and front-to-back attenuation
+therefore show up as a lower achieved SNR rather than as a lower noise floor.
+`--noise-variance V` sets that variance directly instead (`--snr-db` and
+`--noise-variance` are mutually exclusive). With neither flag no noise is added.
+Noise is added whenever the variance is positive, even when a pair's signal is
+exactly zero.
+
+Use `--name` (default `observed`) to keep several variants in one dataset;
+re-running with the same name overwrites just that variant. Each pair gets
+`views/<view_id>/rf/<bs_id>/observed/<name>/aperture_cfr.npy`
+(`complex64`, axis order `row, col, frequency_offset`) and an
+`impairment_gt.json` (the applied `g`, element `gain`/`phase`, timing and common
+phase, plus the pair's `ideal_isotropic_power`, `signal_power`,
+`expected_snr_db` and `achieved_snr_db`). The pair's `artifacts` gains the keys
+`observed.<name>.aperture_cfr` and `observed.<name>.impairment_gt`, and the
+manifest records the variant under `observations[<name>]` (config, seed, RNG
+streams, noise definition and per-pair SNRs). Datasets must be schema v3;
+anything else raises `ManifestError` before writing.
+
+On the mock dataset, run `make rf-camera-multiview-mock` first, then
+`make rf-camera-observe-mock`.
+
 ## Delay sampling note
 
 With bandwidth `B` and `N` frequency bins:

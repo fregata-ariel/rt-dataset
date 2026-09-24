@@ -274,6 +274,113 @@ def rf_camera_optical(
     click.echo(click.style(f"Success! transforms written to: {transforms_path}", fg="green"))
 
 
+@cli.command("rf-camera-observe")
+@click.argument("dataset_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option(
+    "--front-to-back-db", type=float, default=None, help="正面/背面比 [dB] (未指定で理想)"
+)
+@click.option("--common-phase-deg", type=float, default=0.0, show_default=True)
+@click.option("--random-common-phase/--fixed-common-phase", default=False)
+@click.option("--timing-offset-ns", type=float, default=0.0, show_default=True)
+@click.option("--timing-offset-std-ns", type=float, default=0.0, show_default=True)
+@click.option("--element-gain-std-db", type=float, default=0.0, show_default=True)
+@click.option("--element-phase-std-deg", type=float, default=0.0, show_default=True)
+@click.option(
+    "--snr-db",
+    type=float,
+    default=None,
+    help=(
+        "データセット全体の参照電力(全(view, BS)ペアの理想等方平均電力の最大値)に対する"
+        " SNR [dB] (未指定で雑音なし)"
+    ),
+)
+@click.option(
+    "--noise-variance",
+    type=float,
+    default=None,
+    help="素子・ビンあたりの絶対複素雑音分散 (--snr-dbとは排他)",
+)
+@click.option(
+    "--name",
+    default="observed",
+    show_default=True,
+    help="観測バリアント名 (既存の同名バリアントは上書き)",
+)
+@click.option("--seed", type=click.IntRange(0, 2**32 - 1), default=0, show_default=True)
+def rf_camera_observe(
+    dataset_dir: Path,
+    front_to_back_db: float | None,
+    common_phase_deg: float,
+    random_common_phase: bool,
+    timing_offset_ns: float,
+    timing_offset_std_ns: float,
+    element_gain_std_db: float,
+    element_phase_std_deg: float,
+    snr_db: float | None,
+    noise_variance: float | None,
+    name: str,
+    seed: int,
+):
+    """マルチビューRFカメラデータセットに受信機劣化を付与し、単一チャネル観測を生成します。"""
+    import json
+
+    from plateau_rt.application.rf_camera_observe import observe_dataset
+    from plateau_rt.application.rf_dataset_manifest import ManifestError
+    from plateau_rt.domain.rf_camera.impairments import ImpairmentConfig, NoiseSpec
+
+    if random_common_phase and common_phase_deg != 0.0:
+        raise click.UsageError("--random-common-phase は --common-phase-deg と同時に指定できません")
+    if snr_db is not None and noise_variance is not None:
+        raise click.UsageError("--snr-db と --noise-variance は同時に指定できません")
+
+    try:
+        config = ImpairmentConfig(
+            front_to_back_db=front_to_back_db,
+            common_phase_deg=common_phase_deg,
+            random_common_phase=random_common_phase,
+            timing_offset_ns=timing_offset_ns,
+            timing_offset_std_ns=timing_offset_std_ns,
+            element_gain_std_db=element_gain_std_db,
+            element_phase_std_deg=element_phase_std_deg,
+        )
+        noise = NoiseSpec(snr_db=snr_db, noise_variance=noise_variance)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
+
+    try:
+        manifest_path = observe_dataset(dataset_dir, config, noise=noise, seed=seed, name=name)
+    except (ManifestError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    section = json.loads(manifest_path.read_text(encoding="utf-8"))["observations"][name]
+    noise_section = section["noise"]
+    if noise_section["mode"] == "none":
+        click.echo("noise: none")
+    else:
+        reference = noise_section["reference_pair"]
+        reference_text = (
+            "none" if reference is None else f"{reference['view_id']}/{reference['bs_id']}"
+        )
+        click.echo(
+            f"noise: mode={noise_section['mode']} reference_power="
+            f"{noise_section['reference_power']:.6g} reference_pair={reference_text} "
+            f"noise_variance={noise_section['noise_variance']:.6g}"
+        )
+    for pair in section["pairs"]:
+        expected = pair["expected_snr_db"]
+        achieved = pair["achieved_snr_db"]
+        if noise_section["noise_variance"] == 0.0:
+            status = "no noise"
+        elif pair["signal_power"] == 0.0 or expected is None:
+            status = "zero signal"
+        else:
+            achieved_text = "n/a" if achieved is None else f"{achieved:.3f}"
+            status = f"expected_snr_db={expected:.3f} achieved_snr_db={achieved_text}"
+        click.echo(f"{pair['view_id']} {pair['bs_id']} {status}")
+
+    click.echo(click.style(f"Observed dataset manifest: {manifest_path}", fg="green"))
+
+
 @cli.command("render")
 @click.argument("input_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
 def render_heatmaps(input_dir: Path):
