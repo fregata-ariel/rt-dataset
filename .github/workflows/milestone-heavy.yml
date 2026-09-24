@@ -1,5 +1,6 @@
 # 節目 (マイルストーン) に回す重いGPU検証。
 #   - タグ push:  v*  または  milestone/*   (例: git tag milestone/1bs-multiue && git push origin milestone/1bs-multiue)
+#   - マイルストーン開発ブランチ dev/** への push (統合のたびに検証。古い実行はキャンセルして最新だけ検証)
 #   - 手動実行:   Actions タブ または  gh workflow run milestone-heavy.yml --ref <branch>
 #
 # 内容は scripts/ci/run-heavy.sh を参照。生成されたモックデータセットとテスト結果を成果物として保存する。
@@ -10,6 +11,8 @@ on:
     tags:
       - "v*"
       - "milestone/*"
+    branches:
+      - "dev/**"
   workflow_dispatch:
 
 permissions:
@@ -21,7 +24,7 @@ permissions:
 # ランナーは1台なので、ブランチをまたいだジョブもランナー側で順番待ちになり GPU は競合しない。
 concurrency:
   group: milestone-heavy-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/dev/') }}
 
 env:
   IMAGE_PREFIX: plateau-sionna-ci
