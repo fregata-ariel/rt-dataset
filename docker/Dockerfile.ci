@@ -1,0 +1,5 @@
+ARG RUNTIME_IMAGE
+FROM ${RUNTIME_IMAGE}
+
+# CI専用のテストツール (本番用のruntimeイメージには含めない)
+RUN uv pip install --system --no-cache "pytest>=8.0.0"

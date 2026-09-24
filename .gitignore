@@ -23,3 +23,6 @@ build/
 # OS / Temporary
 .DS_Store
 Thumbs.db
+
+# CI reports / generated outputs
+ci-reports/
