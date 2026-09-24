@@ -74,10 +74,7 @@ def calibrate_angular_cfr(
         1j
         * 2.0
         * np.pi
-        * (
-            q_row[:, None] * (aperture_rows - 1) / 2.0
-            + q_col[None, :] * (aperture_cols - 1) / 2.0
-        )
+        * (q_row[:, None] * (aperture_rows - 1) / 2.0 + q_col[None, :] * (aperture_cols - 1) / 2.0)
     )
     centered = raw * phase_origin[:, :, None]
 
@@ -196,10 +193,7 @@ def calibrate_directory(output_dir: Path, phase_floor_db: float = -35.0) -> dict
         "geometric LoS source direction, UE-local: "
         f"kx/k={los_local[0]:+.6f}, ky/k={los_ky:+.6f}, kz/k={los_kz:+.6f}"
     )
-    print(
-        "center-bin angular peak: "
-        f"ky/k={peak_ky:+.6f}, kz/k={peak_kz:+.6f}, index={peak_index}"
-    )
+    print(f"center-bin angular peak: ky/k={peak_ky:+.6f}, kz/k={peak_kz:+.6f}, index={peak_index}")
     print(f"peak-to-LoS yz projection error={los_projection_error:.6f}")
     print(
         "note: a planar y-z aperture has front/back ambiguity in local x; "
@@ -259,8 +253,7 @@ def calibrate_directory(output_dir: Path, phase_floor_db: float = -35.0) -> dict
     ax.set_xlabel("UE-local horizontal direction cosine ky/k")
     ax.set_ylabel("UE-local vertical direction cosine kz/k")
     ax.set_title(
-        "RF camera angular spectrum: calibrated phase [rad] "
-        f"(power >= {phase_floor_db:g} dB)"
+        f"RF camera angular spectrum: calibrated phase [rad] (power >= {phase_floor_db:g} dB)"
     )
     ax.legend()
     fig.colorbar(image, ax=ax, label="phase [rad]")

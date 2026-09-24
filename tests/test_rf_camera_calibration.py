@@ -26,9 +26,9 @@ def test_calibration_recovers_physical_direction_and_phase_origin():
     y = (col - (cols - 1) / 2.0) * d_h
     z = ((rows - 1) / 2.0 - row) * d_v
 
-    aperture = np.exp(
-        1j * (expected_phase + 2.0 * np.pi * (expected_ky * y + expected_kz * z))
-    )[:, :, None]
+    aperture = np.exp(1j * (expected_phase + 2.0 * np.pi * (expected_ky * y + expected_kz * z)))[
+        :, :, None
+    ]
     raw = aperture_to_angular_fft(aperture, fft_rows=fft_rows, fft_cols=fft_cols)
 
     calibrated = calibrate_angular_cfr(

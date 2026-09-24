@@ -1,12 +1,17 @@
-import json
 import gc
+import json
 from pathlib import Path
-from typing import Dict, Any, Optional, List
-import numpy as np
+from typing import Dict, List, Optional
 
+import numpy as np
 from sionna.rt import (
-    load_scene, Transmitter, Receiver, PlanarArray,
-    Scene, RadioMapSolver, PathSolver, Camera,
+    PathSolver,
+    PlanarArray,
+    RadioMapSolver,
+    Receiver,
+    Scene,
+    Transmitter,
+    load_scene,
 )
 
 
@@ -66,12 +71,14 @@ class SionnaSimulator:
 
         # 2D ヒートマップ画像を生成
         from plateau_rt.adapters.sionna.renderer import CoverageRenderer
+
         results["heatmap_path_gain"] = CoverageRenderer.render_path_gain(
             path_gain, output_dir / "render_2d_heatmap.png"
         )
 
         # カバレッジ付き3Dレンダリング
         from plateau_rt.adapters.sionna.renderer import render_3d_scene
+
         try:
             cam_pos, cam_look = self._auto_camera_position()
             results["render_3d_coverage"] = render_3d_scene(
@@ -145,14 +152,20 @@ class SionnaSimulator:
         assert self.scene is not None
 
         self.scene.tx_array = PlanarArray(
-            num_rows=4, num_cols=4,
-            vertical_spacing=0.5, horizontal_spacing=0.5,
-            pattern="tr38901", polarization="V",
+            num_rows=4,
+            num_cols=4,
+            vertical_spacing=0.5,
+            horizontal_spacing=0.5,
+            pattern="tr38901",
+            polarization="V",
         )
         self.scene.rx_array = PlanarArray(
-            num_rows=1, num_cols=1,
-            vertical_spacing=0.5, horizontal_spacing=0.5,
-            pattern="dipole", polarization="V",
+            num_rows=1,
+            num_cols=1,
+            vertical_spacing=0.5,
+            horizontal_spacing=0.5,
+            pattern="dipole",
+            polarization="V",
         )
 
         tx = Transmitter(

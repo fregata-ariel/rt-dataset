@@ -1,16 +1,19 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
+
 import numpy as np
 
 # 外部ライブラリ
 import trimesh
 
-from plateau_rt.domain.models import Scene, SurfaceType, MaterialType
+from plateau_rt.domain.models import MaterialType, Scene, Surface, SurfaceType
+
 
 @dataclass
 class MeshRecord:
     """エクスポートされたメッシュの情報（XMLコンパイラへ渡すための中間データ）"""
+
     object_id: str
     file_path: Path
     surface_type: SurfaceType
@@ -41,15 +44,15 @@ class TrimeshAdapter:
             for surf_type, surfaces in surface_groups.items():
                 # そのグループのベースマテリアル（基本はリストの先頭のもの）
                 material = surfaces[0].material if surfaces else MaterialType.DEFAULT
-                
+
                 # 建物IDと部位から、Sionna上で識別するためのオブジェクト名を生成
                 object_id = f"{bldg.building_id}_{surf_type.value}"
-                
+
                 # メッシュの生成と保存
                 mesh = self._build_mesh(surfaces)
                 if mesh.is_empty:
                     continue
-                
+
                 ply_path = self.output_dir / f"{object_id}.ply"
                 mesh.export(str(ply_path), file_type="ply")
 
@@ -58,14 +61,14 @@ class TrimeshAdapter:
                         object_id=object_id,
                         file_path=ply_path,
                         surface_type=surf_type,
-                        material=material
+                        material=material,
                     )
                 )
 
         print(f"Exported {len(records)} meshes to {self.output_dir}")
         return records
 
-    def _build_mesh(self, surfaces: List['Surface']) -> trimesh.Trimesh:
+    def _build_mesh(self, surfaces: List[Surface]) -> trimesh.Trimesh:
         """複数の多角形Surfaceから、1つの三角形Trimeshを構築する"""
         all_vertices = []
         all_faces = []
@@ -86,9 +89,9 @@ class TrimeshAdapter:
             # v0を基点として、(v0, v1, v2), (v0, v2, v3)... と三角形を作ります。
             for i in range(1, n_pts - 1):
                 face = (
-                    vertex_offset,          # v0
-                    vertex_offset + i,      # vi
-                    vertex_offset + i + 1   # vi+1
+                    vertex_offset,  # v0
+                    vertex_offset + i,  # vi
+                    vertex_offset + i + 1,  # vi+1
                 )
                 all_faces.append(face)
 
@@ -97,5 +100,5 @@ class TrimeshAdapter:
         return trimesh.Trimesh(
             vertices=np.array(all_vertices, dtype=np.float32),
             faces=np.array(all_faces, dtype=np.int32),
-            process=True  # 重複頂点の結合(マージ)や不正な面のクリーンアップを自動実行
+            process=True,  # 重複頂点の結合(マージ)や不正な面のクリーンアップを自動実行
         )

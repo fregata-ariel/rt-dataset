@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
-from typing import Dict, Any, List, Tuple
-from plateau_rt.domain.models import Building, Surface, SurfaceType, MaterialType, Scene
-from cjio.cityjson import CityJSON
+from typing import Any, Dict, List, Tuple
+
+from plateau_rt.domain.models import Building, MaterialType, Scene, Surface, SurfaceType
 
 
 class CityJSONAdapter:

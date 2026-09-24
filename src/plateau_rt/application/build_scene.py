@@ -1,9 +1,9 @@
 import json
-from pathlib import Path
 from datetime import datetime, timezone
+from pathlib import Path
 
-from plateau_rt.adapters.plateau.cityjson_parser import CityJSONAdapter
 from plateau_rt.adapters.geometry.trimesh_adapter import TrimeshAdapter
+from plateau_rt.adapters.plateau.cityjson_parser import CityJSONAdapter
 from plateau_rt.adapters.sionna.scene_compiler import SionnaSceneCompiler
 from plateau_rt.domain.models import Scene
 

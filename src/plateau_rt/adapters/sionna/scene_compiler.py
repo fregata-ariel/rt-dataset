@@ -1,10 +1,12 @@
 import xml.etree.ElementTree as ET
-from xml.dom import minidom
 from pathlib import Path
 from typing import List
+from xml.dom import minidom
 
-from plateau_rt.domain.models import Scene as DomainScene, MaterialType
 from plateau_rt.adapters.geometry.trimesh_adapter import MeshRecord
+from plateau_rt.domain.models import MaterialType
+from plateau_rt.domain.models import Scene as DomainScene
+
 
 class SionnaSceneCompiler:
     MATERIAL_MAP = {
@@ -15,7 +17,9 @@ class SionnaSceneCompiler:
         MaterialType.DEFAULT: "itu_concrete",
     }
 
-    def compile(self, domain_scene: DomainScene, mesh_records: List[MeshRecord], output_dir: Path) -> Path:
+    def compile(
+        self, domain_scene: DomainScene, mesh_records: List[MeshRecord], output_dir: Path
+    ) -> Path:
         xml_path = output_dir / f"{domain_scene.scene_id}.xml"
         self._write_mitsuba_xml(mesh_records, xml_path)
         print(f"Sionna scene compiled at {xml_path}")

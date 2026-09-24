@@ -198,9 +198,7 @@ def develop_angle_delay(
     los_row = int(np.argmin(np.abs(kz_over_k - los_kz)))
     los_col = int(np.argmin(np.abs(ky_over_k - los_ky)))
 
-    geometric_delay = geometric_los_delay_s(
-        tuple(cfg["tx_position"]), tuple(cfg["ue_position"])
-    )
+    geometric_delay = geometric_los_delay_s(tuple(cfg["tx_position"]), tuple(cfg["ue_position"]))
     geometric_delay_mod = geometric_delay % volume.unambiguous_delay_s
 
     los_profile = power[los_row, los_col, :]
@@ -269,9 +267,7 @@ def develop_angle_delay(
     global_peak_power = max(float(np.max(power[physical_mask, :])), 1e-30)
 
     delay_slice = power[:, :, peak_delay_bin]
-    delay_slice_db = 10.0 * np.log10(
-        np.maximum(delay_slice / global_peak_power, 1e-12)
-    )
+    delay_slice_db = 10.0 * np.log10(np.maximum(delay_slice / global_peak_power, 1e-12))
     delay_slice_db = np.ma.masked_where(~physical_mask, delay_slice_db)
     delay_slice_png = output_dir / "angular_power_strongest_delay.png"
     fig, ax = plt.subplots(figsize=(8, 6))
@@ -292,10 +288,7 @@ def develop_angle_delay(
     )
     ax.set_xlabel("UE-local horizontal direction cosine ky/k")
     ax.set_ylabel("UE-local vertical direction cosine kz/k")
-    ax.set_title(
-        "RF camera angle-delay: normalized power at "
-        f"{strongest_delay * 1e9:.1f} ns"
-    )
+    ax.set_title(f"RF camera angle-delay: normalized power at {strongest_delay * 1e9:.1f} ns")
     ax.legend()
     fig.colorbar(image, ax=ax, label="dB relative to volume peak")
     fig.tight_layout()
@@ -324,9 +317,7 @@ def develop_angle_delay(
     plt.close(fig)
 
     per_direction_peak = np.max(power, axis=2)
-    per_direction_db = 10.0 * np.log10(
-        np.maximum(per_direction_peak / global_peak_power, 1e-12)
-    )
+    per_direction_db = 10.0 * np.log10(np.maximum(per_direction_peak / global_peak_power, 1e-12))
     dominant_delay_bin = np.argmax(power, axis=2)
     dominant_delay_ns = volume.delay_s[dominant_delay_bin] * 1e9
     dominant_mask = physical_mask & (per_direction_db >= power_floor_db)
@@ -345,10 +336,7 @@ def develop_angle_delay(
     ax.scatter([los_ky], [los_kz], marker="x", label="geometric LoS")
     ax.set_xlabel("UE-local horizontal direction cosine ky/k")
     ax.set_ylabel("UE-local vertical direction cosine kz/k")
-    ax.set_title(
-        "RF camera dominant delay [ns] "
-        f"(peak power >= {power_floor_db:g} dB)"
-    )
+    ax.set_title(f"RF camera dominant delay [ns] (peak power >= {power_floor_db:g} dB)")
     ax.legend()
     fig.colorbar(image, ax=ax, label="dominant delay [ns]")
     fig.tight_layout()
@@ -399,7 +387,8 @@ def develop_angle_delay(
         "notes": [
             "delay resolution is set by total sampled bandwidth, not by zero-padding",
             "delays repeat modulo the unambiguous period 1/delta_f",
-            "the rectangular frequency window produces delay sidelobes; no window is applied to the saved complex target",
+            "the rectangular frequency window produces delay sidelobes; "
+            "no window is applied to the saved complex target",
         ],
     }
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")

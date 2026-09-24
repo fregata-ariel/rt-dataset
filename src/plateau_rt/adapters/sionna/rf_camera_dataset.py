@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-
 from sionna.rt import PathSolver, PlanarArray, Receiver, Transmitter, load_scene
 
 from plateau_rt.adapters.sionna.rf_camera import (
@@ -347,8 +346,7 @@ class RFMultiViewDataset:
         print(f"Paths.cfr shape={cfr.shape}, dtype={cfr.dtype}")
         if cfr.shape != expected:
             raise RuntimeError(
-                "Unexpected multi-view Paths.cfr shape: "
-                f"expected={expected}, actual={cfr.shape}"
+                f"Unexpected multi-view Paths.cfr shape: expected={expected}, actual={cfr.shape}"
             )
 
         camera_model = build_direction_cosine_camera_model(
@@ -480,9 +478,7 @@ class RFMultiViewDataset:
                     "bs_in_front_hemisphere": bool(bs_local[0] >= 0.0),
                     "artifacts": {
                         "pose": str((view_dir / "pose.json").relative_to(output_dir)),
-                        "aperture_cfr": str(
-                            (rf_dir / "aperture_cfr.npy").relative_to(output_dir)
-                        ),
+                        "aperture_cfr": str((rf_dir / "aperture_cfr.npy").relative_to(output_dir)),
                         "angular_cfr_center": str(
                             (rf_dir / "angular_cfr_center.npy").relative_to(output_dir)
                         ),
@@ -513,9 +509,7 @@ class RFMultiViewDataset:
             "source_scene": str(self.xml_path),
             "config": asdict(cfg),
             "frequency_offsets_hz": frequency_offsets_hz.tolist(),
-            "absolute_frequencies_hz": (
-                cfg.carrier_frequency_hz + frequency_offsets_hz
-            ).tolist(),
+            "absolute_frequencies_hz": (cfg.carrier_frequency_hz + frequency_offsets_hz).tolist(),
             "delay_resolution_s": 1.0 / cfg.bandwidth_hz,
             "unambiguous_delay_s": unambiguous_delay_s,
             "camera_model": {
@@ -544,9 +538,7 @@ class RFMultiViewDataset:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Generate a 1-BS / multi-UE RF-camera dataset"
-    )
+    parser = argparse.ArgumentParser(description="Generate a 1-BS / multi-UE RF-camera dataset")
     parser.add_argument("xml_file", type=Path)
     parser.add_argument("output_dir", type=Path)
     parser.add_argument("--num-views", type=int, default=8)

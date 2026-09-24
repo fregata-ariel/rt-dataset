@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-
 from sionna.rt import PathSolver, PlanarArray, Receiver, Transmitter, load_scene
 
 
@@ -207,9 +206,7 @@ class RFCameraMVP:
             "mode": "1bs_1ue_rf_camera_mvp",
             "config": asdict(cfg),
             "frequency_offsets_hz": frequency_offsets_hz.tolist(),
-            "absolute_frequencies_hz": (
-                cfg.carrier_frequency_hz + frequency_offsets_hz
-            ).tolist(),
+            "absolute_frequencies_hz": (cfg.carrier_frequency_hz + frequency_offsets_hz).tolist(),
             "sionna_cfr_axis_order": [
                 "rx",
                 "rx_ant",
@@ -223,10 +220,15 @@ class RFCameraMVP:
             "aperture_shape": list(aperture_cfr.shape),
             "planar_array_numbering": "column-first, top-left to bottom-right",
             "array_plane": "local y-z",
-            "angular_fft_axis_order": ["vertical_spatial_frequency", "horizontal_spatial_frequency", "frequency_offset"],
+            "angular_fft_axis_order": [
+                "vertical_spatial_frequency",
+                "horizontal_spatial_frequency",
+                "frequency_offset",
+            ],
             "angular_fft_shape": list(angular_cfr.shape),
             "notes": [
-                "angular_cfr is a zero-padded 2-D spatial FFT diagnostic, not yet a calibrated AoA image",
+                "angular_cfr is a zero-padded 2-D spatial FFT diagnostic, "
+                "not yet a calibrated AoA image",
                 "Tx uses one active antenna/port for the MVP",
                 "ideal coherent Sionna phase is preserved",
                 "absolute path delays are requested with normalize_delays=False",
@@ -294,9 +296,7 @@ def _reshape_planar_column_first(
     """
     aperture_flat = np.asarray(aperture_flat)
     if aperture_flat.shape[0] != rows * cols:
-        raise ValueError(
-            f"Expected {rows * cols} antenna samples, got {aperture_flat.shape[0]}"
-        )
+        raise ValueError(f"Expected {rows * cols} antenna samples, got {aperture_flat.shape[0]}")
 
     out = np.empty((rows, cols) + aperture_flat.shape[1:], dtype=aperture_flat.dtype)
     for antenna_index in range(rows * cols):
