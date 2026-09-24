@@ -31,14 +31,21 @@ class Checker:
     def exists(self, path: Path) -> bool:
         return self.check(path.is_file(), f"exists: {path.relative_to(self.root)}")
 
-    def finite_nonzero(self, path: Path, *, allow_nan: bool = False) -> np.ndarray | None:
+    def finite(self, path: Path, *, allow_nan: bool = False) -> np.ndarray | None:
         if not self.exists(path):
             return None
-        name = path.relative_to(self.root)
         array = np.load(path)
         values = array[~np.isnan(array)] if allow_nan else array
-        self.check(bool(np.isfinite(values).all()), f"finite: {name} {array.shape}")
-        self.check(bool(np.abs(values).max() > 0), f"nonzero: {name}")
+        self.check(
+            bool(np.isfinite(values).all()), f"finite: {path.relative_to(self.root)} {array.shape}"
+        )
+        return array
+
+    def finite_nonzero(self, path: Path, *, allow_nan: bool = False) -> np.ndarray | None:
+        array = self.finite(path, allow_nan=allow_nan)
+        if array is not None:
+            values = array[~np.isnan(array)] if allow_nan else array
+            self.check(bool(np.abs(values).max() > 0), f"nonzero: {path.relative_to(self.root)}")
         return array
 
 
@@ -87,26 +94,51 @@ def check_multiview(c: Checker, mv: Path, num_views: int) -> None:
     manifest = json.loads((mv / "dataset_manifest.json").read_text())
     config = manifest["config"]
     views = manifest["views"]
+    c.check(manifest["schema_version"] == 2, f"schema_version: {manifest['schema_version']} == 2")
     c.check(len(views) == num_views, f"views: {len(views)} == {num_views}")
+    hemispheres = manifest["raw_observation"]["hemispheres"]
+    c.check(hemispheres == ["front", "back"], f"hemispheres: {hemispheres}")
 
     if c.exists(mv / "camera_model.npz"):
         model = np.load(mv / "camera_model.npz")
         expected = (config["fft_rows"], config["fft_cols"], 3)
         shape = model["ray_directions_local"].shape
         c.check(shape == expected, f"camera rays shape: {shape} == {expected}")
+        weight_shape = model["solid_angle_weight"].shape
+        c.check(weight_shape == expected[:2], f"solid-angle weight shape: {weight_shape}")
     c.exists(mv / "path_geometry_gt.npz")
 
-    aperture_shape = (config["rx_rows"], config["rx_cols"], config["num_frequency_bins"])
+    aperture_shape = (
+        len(hemispheres),
+        config["rx_rows"],
+        config["rx_cols"],
+        config["num_frequency_bins"],
+    )
     for view in views:
+        view_id = view["view_id"]
         for name, rel in view["artifacts"].items():
             c.exists(mv / rel)
-        rf = mv / view["artifacts"]["aperture_cfr"]
-        cfr = c.finite_nonzero(rf)
-        if cfr is not None:
-            c.check(cfr.shape == aperture_shape, f"{view['view_id']} aperture_cfr {cfr.shape}")
-        c.finite_nonzero(mv / view["artifacts"]["angular_power_center"])
+        # 前面・背面の少なくとも一方にはエネルギーが届いている
+        cfr = c.finite_nonzero(mv / view["artifacts"]["aperture_cfr"])
+        shape_ok = cfr is not None and c.check(
+            cfr.shape == aperture_shape, f"{view_id} aperture_cfr {cfr.shape}"
+        )
+        if shape_ok:
+            energy = {h: float(np.sum(np.abs(cfr[i]) ** 2)) for i, h in enumerate(hemispheres)}
+            recorded = view["hemisphere_energy"]
+            c.check(
+                all(np.isclose(energy[h], recorded[h], rtol=1e-4) for h in hemispheres),
+                f"{view_id} hemisphere energy matches manifest",
+            )
+            # mock は直接波が支配的なので、エネルギーの大半は BS のある半球から届く
+            # (前後の分割が入れ替わっていないことの確認)
+            dominant = max(energy, key=energy.get)
+            bs_side = "front" if view["bs_in_front_hemisphere"] else "back"
+            c.check(dominant == bs_side, f"{view_id} dominant hemisphere {dominant} == {bs_side}")
+        # 前面から何も届かない視点では現像画像が空になる (背面の光源と同じ扱い)
+        c.finite(mv / view["artifacts"]["angular_power_center"])
         # 位相が有効でない画素は NaN で埋められる
-        c.finite_nonzero(mv / view["artifacts"]["dominant_delay_s"], allow_nan=True)
+        c.finite(mv / view["artifacts"]["dominant_delay_s"], allow_nan=True)
 
 
 def main() -> None:

@@ -5,6 +5,8 @@ from plateau_rt.domain.rf_camera.camera import (
     build_direction_cosine_camera_model,
     generate_ring_views,
     look_at_orientation,
+    solid_angle_weight,
+    to_solid_angle_amplitude,
 )
 
 
@@ -62,3 +64,38 @@ def test_direction_cosine_camera_model_is_unit_front_hemisphere():
     row = int(np.argmin(np.abs(kz)))
     col = int(np.argmin(np.abs(ky)))
     np.testing.assert_allclose(rays[row, col], [1.0, 0.0, 0.0], atol=1e-6)
+
+
+def test_solid_angle_weight_is_normal_component_on_the_disk():
+    ky = np.array([-1.0, -0.6, 0.0, 0.6, 1.0])
+    kz = np.array([-0.8, 0.0, 0.8])
+
+    weight = solid_angle_weight(ky, kz)
+
+    assert weight.shape == (3, 5)
+    assert weight[1, 2] == 1.0  # boresight
+    np.testing.assert_allclose(weight[1, 3], 0.8)  # sqrt(1 - 0.6^2)
+    np.testing.assert_allclose(weight[0, 3], 0.0, atol=1e-12)  # on the rim
+    assert weight[0, 0] == 0.0  # outside the propagating disk
+
+
+def test_solid_angle_amplitude_scales_every_frequency_by_kx():
+    ky = np.array([0.0, 0.6])
+    kz = np.array([0.0])
+    spectrum = np.ones((1, 2, 3), dtype=np.complex64) * (1.0 + 1.0j)
+
+    amplitude = to_solid_angle_amplitude(spectrum, ky, kz)
+
+    np.testing.assert_allclose(amplitude[0, 0], 1.0 + 1.0j)
+    np.testing.assert_allclose(amplitude[0, 1], 0.8 * (1.0 + 1.0j))
+
+
+def test_camera_model_solid_angle_weight_matches_ray_x_component():
+    model = build_direction_cosine_camera_model(
+        fft_rows=32, fft_cols=32, horizontal_spacing_lambda=0.5, vertical_spacing_lambda=0.5
+    )
+
+    np.testing.assert_allclose(
+        model["solid_angle_weight"], model["ray_directions_local"][..., 0], atol=1e-7
+    )
+    assert np.all(model["solid_angle_weight"][~model["valid_mask"]] == 0.0)

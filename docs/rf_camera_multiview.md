@@ -17,12 +17,46 @@ Each UE is an RF camera.
 kx/k = +sqrt(1 - (ky/k)^2 - (kz/k)^2)
 ```
 
-The 2-D planar aperture alone has a front/back ambiguity. For the multi-view
-camera dataset the Rx element pattern is therefore changed from the symmetric
-`dipole` used in the first validation experiment to the directional
-`tr38901` pattern. Its boresight is local +x and its back hemisphere is strongly
-attenuated. This makes the +x hemisphere the camera convention, but does not
-mathematically remove all back-hemisphere energy.
+### Front / back hemispheres
+
+The 2-D planar aperture alone cannot tell `+kx` from `-kx`: a wave arriving
+from behind lands on the same `(ky/k, kz/k)` pixel as its mirror image in
+front. (With the earlier directional `tr38901` element, whose front-to-back
+ratio is only 30 dB, the BS behind a camera still produced the brightest pixel
+of its image as such a mirrored ghost.)
+
+The Rx element is therefore the `rf_camera_split` pattern
+(`src/plateau_rt/adapters/sionna/rf_patterns.py`). It fills Sionna's two
+antenna-pattern slots with the front (`kx >= 0`) and back (`kx < 0`) halves of
+a vertically polarized isotropic element, so one `PathSolver` call records both
+hemispheres separately and exactly:
+
+- `front + back` equals the isotropic element (checked in the heavy CI);
+- a finite front-to-back ratio `g` can be synthesized later as
+  `front + g * back`, without re-tracing;
+- the developed image uses the **front** hemisphere only. Arrivals from behind
+  are excluded like a light source behind an optical camera: the BS behind a
+  UE is not imaged, but the scene it illuminates in front is. A view with
+  nothing arriving from the front therefore has an empty image.
+
+Because both pattern slots are used, dual polarization is not available with
+this pattern.
+
+### Image quantity
+
+The FFT of an isotropic aperture measures the plane-wave spectrum `U(ky, kz)`,
+an amplitude per unit direction-cosine area. A pixel covers the solid angle
+`dOmega = dky dkz / kx`, so the developed image is the complex amplitude per
+unit solid angle
+
+```text
+A(ky, kz) = kx * U(ky, kz),   kx = sqrt(1 - ky^2 - kz^2)
+```
+
+`|A|^2` is power per steradian (the RF analogue of radiance), the quantity a
+Gaussian-Splatting renderer integrates over solid angle. The weight `kx` is a
+known per-pixel function stored as `solid_angle_weight` in `camera_model.npz`;
+the raw aperture CFR is kept unweighted.
 
 ## Mock geometry
 
@@ -40,6 +74,11 @@ test uses:
 - 64 uniformly spaced baseband frequency bins
 
 All eight receivers are solved in **one** Sionna `PathSolver` call.
+
+The mock has a single building and no ground, so each ring view receives only
+the direct BS path. Each view therefore has energy in one hemisphere only, and
+the views with the BS behind them (`ue_000004` to `ue_000006`) have empty
+front images. Richer scenes are tracked in #7.
 
 ## Run
 
@@ -70,10 +109,14 @@ PYTHONPATH=./src uv run pytest tests -q
 For the default 8-view mock:
 
 ```text
-(8, 64, 1, 1, 1, 64)
- ^   ^   ^  ^  ^   ^
+(8, 128, 1, 1, 1, 64)
+ ^   ^    ^  ^  ^   ^
  UE rxant tx txant t freq
 ```
+
+`rxant = 2 x 64`: Sionna fuses the pattern axis pattern-major, so channels
+`0..63` are the front hemisphere and `64..127` the back hemisphere (each in
+PlanarArray column-first order).
 
 ## Output layout
 
@@ -99,10 +142,12 @@ rf_camera_multiview/
 
 ### Canonical vs derived data
 
-`aperture_cfr.npy` is the canonical compact RF observation. It preserves the
-complex CFR on the physical UE aperture over frequency.
+`aperture_cfr.npy` is the canonical compact RF observation,
+`[hemisphere, row, col, frequency]` with hemispheres `(front, back)`. It
+preserves the complex CFR on the physical UE aperture over frequency.
 
-The following files are derived and can be regenerated from the aperture CFR:
+The following files are derived from the front hemisphere (as `A = kx * U`)
+and can be regenerated from the aperture CFR:
 
 - center-frequency calibrated angular complex image
 - center-frequency power image
@@ -120,6 +165,7 @@ keeping all information needed to regenerate it.
 
 - `ray_directions_local[H,W,3]`
 - `valid_mask[H,W]`
+- `solid_angle_weight[H,W]` (`kx`, 0 outside the propagating disk)
 - `ky_over_k[W]`
 - `kz_over_k[H]`
 
@@ -132,6 +178,18 @@ ray_world = world_from_local_rotation @ ray_local
 ```
 
 This is the intended bridge to a Gaussian-Splatting camera model.
+
+## Manifest (schema version 2)
+
+Besides the configuration and frequency grid, `dataset_manifest.json` records
+
+- `raw_observation`: axis order and hemisphere names of `aperture_cfr`, and the
+  Rx element pattern;
+- `camera_model`: projection, developed hemisphere and the image quantity
+  definition;
+- per view: pose, `bs_direction_local`, `bs_in_front_hemisphere` and
+  `hemisphere_energy` (sum of `|aperture_cfr|^2` per hemisphere), so views with
+  back-hemisphere energy can be found without loading the arrays.
 
 ## Delay sampling note
 
@@ -158,9 +216,9 @@ Paths.cfr shape=...
 ```
 
 Also share a few `views/*/rf/angular_power_center.png` images, preferably views
-from different sides of the ring. We want to verify that the directional
-`tr38901` camera and per-view pose rotations produce coherent but genuinely
-different observations.
+from different sides of the ring. We want to verify that the front-hemisphere
+camera and per-view pose rotations produce coherent but genuinely different
+observations.
 
 ## Not implemented yet
 

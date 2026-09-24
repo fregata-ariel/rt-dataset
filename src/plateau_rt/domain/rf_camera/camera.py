@@ -1,9 +1,16 @@
 """RF-camera poses and the direction-cosine camera model (NumPy only).
 
 Each UE is an RF camera: local +x is the camera forward axis and the receive
-aperture lies in the local y-z plane. A developed image is a direction-cosine
-disk ``(ky/k, kz/k)``; front-hemisphere rays are reconstructed with
-``kx/k = +sqrt(1 - (ky/k)^2 - (kz/k)^2)``.
+aperture lies in the local y-z plane. The aperture is recorded separately for
+the front (``kx >= 0``) and back (``kx < 0``) hemispheres; the developed image
+is the front hemisphere on a direction-cosine disk ``(ky/k, kz/k)``, with rays
+reconstructed as ``kx/k = +sqrt(1 - (ky/k)^2 - (kz/k)^2)``.
+
+Image quantity: the FFT of an isotropic aperture measures the plane-wave
+spectrum ``U(ky, kz)`` (amplitude per unit direction-cosine area). A pixel
+covers the solid angle ``dOmega = dky dkz / kx``, so the developed image is the
+complex amplitude per unit solid angle ``A = kx * U``; ``|A|^2`` is power per
+steradian, the quantity a renderer integrates over solid angle.
 """
 
 from __future__ import annotations
@@ -17,6 +24,8 @@ from plateau_rt.domain.rf_camera.calibration import direction_cosine_axes, rotat
 from plateau_rt.domain.rf_camera.delay import propagating_direction_mask
 
 PROJECTION = "front_hemisphere_direction_cosine"
+HEMISPHERES = ("front", "back")
+IMAGE_QUANTITY = "solid_angle_amplitude"
 
 
 @dataclass(frozen=True)
@@ -104,6 +113,24 @@ def view_pose_payload(view: RFViewSpec) -> dict[str, Any]:
     }
 
 
+def solid_angle_weight(ky_over_k: np.ndarray, kz_over_k: np.ndarray) -> np.ndarray:
+    """Return ``kx/k`` on the ``[kz, ky]`` image grid (0 outside the propagating disk)."""
+    ky = np.asarray(ky_over_k, dtype=np.float64)[None, :]
+    kz = np.asarray(kz_over_k, dtype=np.float64)[:, None]
+    return np.sqrt(np.maximum(1.0 - ky**2 - kz**2, 0.0))
+
+
+def to_solid_angle_amplitude(
+    angular_cfr: np.ndarray,
+    ky_over_k: np.ndarray,
+    kz_over_k: np.ndarray,
+) -> np.ndarray:
+    """Convert a calibrated angular spectrum ``U[kz, ky, ...]`` into ``A = kx * U``."""
+    cfr = np.asarray(angular_cfr)
+    weight = solid_angle_weight(ky_over_k, kz_over_k)
+    return cfr * weight.reshape(weight.shape + (1,) * (cfr.ndim - 2))
+
+
 def build_direction_cosine_camera_model(
     *,
     fft_rows: int,
@@ -123,8 +150,7 @@ def build_direction_cosine_camera_model(
 
     ky_grid = np.broadcast_to(ky[None, :], (fft_rows, fft_cols))
     kz_grid = np.broadcast_to(kz[:, None], (fft_rows, fft_cols))
-    kx_sq = 1.0 - ky_grid**2 - kz_grid**2
-    kx = np.sqrt(np.maximum(kx_sq, 0.0))
+    kx = solid_angle_weight(ky, kz)
 
     rays = np.stack([kx, ky_grid, kz_grid], axis=-1).astype(np.float32)
     rays[~valid] = 0.0
@@ -132,6 +158,7 @@ def build_direction_cosine_camera_model(
     return {
         "ray_directions_local": rays,
         "valid_mask": valid.astype(bool),
+        "solid_angle_weight": np.where(valid, kx, 0.0).astype(np.float32),
         "ky_over_k": ky.astype(np.float32),
         "kz_over_k": kz.astype(np.float32),
     }

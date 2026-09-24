@@ -4,7 +4,8 @@
 #   2. インフラ統合テスト (Sionna-RT のCPU/LLVMサブセット, 既存の test サービス)
 #   3. Sionna-RT 本体 (submodule) のユニットテスト全体を GPU で実行
 #   4. モック建物での End-to-End パイプライン (Makefile の *-mock ターゲット)
-#   5. 生成物の検証 (形状・有限性・LoSの角度/遅延の整合性)
+#   5. 生成物の検証 (形状・有限性・LoSの角度/遅延の整合性、前後の半球の向き)
+#   6. 前面/背面分割パターンが等方性素子を正確に分割していることの確認
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
@@ -40,5 +41,8 @@ gpu_run make MOCK_OUT="${MOCK_OUT}/" \
 echo "🔍 Step 5: Validate generated outputs"
 # ビュー数は Makefile の rf-camera-multiview-mock (--num-views 8) と一致させる
 gpu_run python scripts/ci/check_mock_outputs.py "${MOCK_OUT}" --num-views 8
+
+echo "🧭 Step 6: Front/back hemisphere split reproduces the isotropic element"
+gpu_run python scripts/ci/check_hemisphere_split.py "${MOCK_OUT}/mock_building.city.xml"
 
 echo "✅ Heavy CI finished"

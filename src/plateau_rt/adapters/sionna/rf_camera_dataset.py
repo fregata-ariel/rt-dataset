@@ -3,9 +3,12 @@
 This stage turns the validated 1-BS / 1-UE RF-camera pipeline into a
 multi-view dataset suitable for later Gaussian-Splatting experiments.
 
-The canonical stored observation remains the compact complex receive-aperture
-CFR. Per-view angular and delay summaries are derived from it and can be
-regenerated without re-running Sionna RT.
+The canonical stored observation is the compact complex receive-aperture CFR,
+recorded separately for the front and back hemispheres of the UE (one
+PathSolver call with the ``rf_camera_split`` element pattern). Per-view
+angular and delay summaries are developed from the front hemisphere as the
+complex amplitude per unit solid angle and can be regenerated without
+re-running Sionna RT.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from plateau_rt.adapters.plotting.rf_camera_plots import (
     normalized_power_db,
     save_direction_image,
 )
+from plateau_rt.adapters.sionna.rf_patterns import HEMISPHERE_SPLIT_PATTERN
 from plateau_rt.adapters.sionna.rf_tracing import (
     PATH_ANGLE_FIELDS,
     aperture_cfrs,
@@ -35,9 +39,12 @@ from plateau_rt.domain.rf_camera.calibration import (
     geometric_los_source_direction_local,
 )
 from plateau_rt.domain.rf_camera.camera import (
+    HEMISPHERES,
+    IMAGE_QUANTITY,
     PROJECTION,
     RFViewSpec,
     build_direction_cosine_camera_model,
+    to_solid_angle_amplitude,
     view_pose_payload,
 )
 from plateau_rt.domain.rf_camera.delay import angular_cfr_to_delay, dominant_delay
@@ -60,7 +67,6 @@ class RFMultiViewConfig:
     vertical_spacing_lambda: float = 0.5
     horizontal_spacing_lambda: float = 0.5
     tx_pattern: str = "tr38901"
-    rx_pattern: str = "tr38901"
     polarization: str = "V"
 
     fft_rows: int = 128
@@ -117,7 +123,7 @@ class RFMultiViewDataset:
             vertical_spacing_lambda=cfg.vertical_spacing_lambda,
             horizontal_spacing_lambda=cfg.horizontal_spacing_lambda,
             tx_pattern=cfg.tx_pattern,
-            rx_pattern=cfg.rx_pattern,
+            rx_pattern=HEMISPHERE_SPLIT_PATTERN,
             polarization=cfg.polarization,
         )
 
@@ -142,7 +148,7 @@ class RFMultiViewDataset:
         print(f"BS={cfg.tx_position}, look_at={cfg.tx_look_at}")
         print(f"views={len(self.views)}")
         print(
-            f"Rx={cfg.rx_rows}x{cfg.rx_cols} {cfg.rx_pattern}, "
+            f"Rx={cfg.rx_rows}x{cfg.rx_cols} {HEMISPHERE_SPLIT_PATTERN}, "
             f"spacing=({cfg.vertical_spacing_lambda}, {cfg.horizontal_spacing_lambda}) lambda"
         )
 
@@ -196,7 +202,7 @@ class RFMultiViewDataset:
             )
 
         manifest = {
-            "schema_version": 1,
+            "schema_version": 2,
             "mode": "1bs_multiue_rf_camera_dataset",
             "source_scene": str(self.xml_path),
             "config": asdict(cfg),
@@ -204,16 +210,31 @@ class RFMultiViewDataset:
             "absolute_frequencies_hz": (cfg.carrier_frequency_hz + frequency_offsets_hz).tolist(),
             "delay_resolution_s": 1.0 / cfg.bandwidth_hz,
             "unambiguous_delay_s": unambiguous_delay_s,
+            "raw_observation": {
+                "artifact": "aperture_cfr",
+                "axis_order": ["hemisphere", "row", "col", "frequency_offset"],
+                "hemispheres": list(HEMISPHERES),
+                "rx_element_pattern": HEMISPHERE_SPLIT_PATTERN,
+                "note": (
+                    "Front (local kx >= 0) and back (kx < 0) arrivals of a vertically "
+                    "polarized isotropic element; front + back equals the isotropic "
+                    "element. A finite front-to-back ratio g can be synthesized as "
+                    "front + g * back."
+                ),
+            },
             "camera_model": {
                 "projection": PROJECTION,
                 "forward_axis_local": "+x",
                 "array_plane_local": "y-z",
                 "ray_directions": camera_model_path.name,
-                "front_back_note": (
-                    "The 2-D planar aperture measures only ky/k and kz/k. "
-                    "The dataset chooses +kx for camera rays and uses a directional "
-                    "tr38901 Rx element pattern to suppress back-hemisphere energy; "
-                    "back energy is attenuated, not mathematically eliminated."
+                "developed_hemisphere": HEMISPHERES[0],
+                "image_quantity": IMAGE_QUANTITY,
+                "image_definition": (
+                    "A(ky, kz) = kx * U(ky, kz) with kx = sqrt(1 - ky^2 - kz^2): U is the "
+                    "calibrated angular spectrum of the front-hemisphere aperture CFR, A the "
+                    "complex amplitude per unit solid angle (camera_model.npz "
+                    "solid_angle_weight). Back-hemisphere arrivals are excluded, like light "
+                    "behind an optical camera."
                 ),
             },
             "path_geometry_gt": path_gt_path.name,
@@ -239,7 +260,8 @@ class RFMultiViewDataset:
     ) -> dict[str, Any]:
         """Save one view's pose, canonical aperture CFR and derived summaries.
 
-        Returns the view's manifest entry.
+        ``aperture_cfr`` is ``[hemisphere, row, col, freq]``; the developed
+        summaries use the front hemisphere. Returns the view's manifest entry.
         """
         cfg = self.config
         view_dir = output_dir / "views" / view.view_id
@@ -262,15 +284,19 @@ class RFMultiViewDataset:
         )
         np.save(artifacts["aperture_cfr"], aperture_cfr.astype(np.complex64, copy=False))
 
+        front = aperture_cfr[HEMISPHERES.index("front")]
         calibration = calibrate_angular_cfr(
-            aperture_to_angular_fft(aperture_cfr, fft_rows=cfg.fft_rows, fft_cols=cfg.fft_cols),
+            aperture_to_angular_fft(front, fft_rows=cfg.fft_rows, fft_cols=cfg.fft_cols),
             aperture_rows=cfg.rx_rows,
             aperture_cols=cfg.rx_cols,
             horizontal_spacing_lambda=cfg.horizontal_spacing_lambda,
             vertical_spacing_lambda=cfg.vertical_spacing_lambda,
         )
+        image = to_solid_angle_amplitude(
+            calibration.cfr, calibration.ky_over_k, calibration.kz_over_k
+        )
 
-        center_cfr = calibration.cfr[:, :, cfg.num_frequency_bins // 2]
+        center_cfr = image[:, :, cfg.num_frequency_bins // 2]
         center_power = np.abs(center_cfr) ** 2
         np.save(artifacts["angular_cfr_center"], center_cfr.astype(np.complex64, copy=False))
         np.save(artifacts["angular_power_center"], center_power.astype(np.float32, copy=False))
@@ -281,7 +307,7 @@ class RFMultiViewDataset:
         )
         np.save(artifacts["phase_valid_mask"], phase_valid)
 
-        delay_volume = angular_cfr_to_delay(calibration.cfr, frequency_offsets_hz)
+        delay_volume = angular_cfr_to_delay(image, frequency_offsets_hz)
         _, dominant_delay_s, dominant_power = dominant_delay(
             np.abs(delay_volume.cir) ** 2,
             delay_volume.delay_s,
@@ -297,7 +323,7 @@ class RFMultiViewDataset:
             np.ma.masked_where(~valid_ray_mask, normalized_power_db(center_power, view_peak)),
             artifacts["debug_power_png"],
             extent=image_extent(calibration.ky_over_k, calibration.kz_over_k),
-            title="RF camera center-frequency power [dB rel. view peak]",
+            title="RF camera front hemisphere |A|^2, center frequency [dB rel. view peak]",
             colorbar_label="dB",
             vmin=-60.0,
             vmax=0.0,
@@ -312,6 +338,10 @@ class RFMultiViewDataset:
             ue_position=view.position,
             ue_orientation=view.orientation,
         )
+        energy = {
+            name: float(np.sum(np.abs(aperture_cfr[index]) ** 2))
+            for index, name in enumerate(HEMISPHERES)
+        }
         return {
             "view_id": view.view_id,
             "position_m": list(view.position),
@@ -319,6 +349,8 @@ class RFMultiViewDataset:
             "orientation_rad": list(view.orientation),
             "bs_direction_local": bs_local.tolist(),
             "bs_in_front_hemisphere": bool(bs_local[0] >= 0.0),
+            # Sum of |aperture CFR|^2 over elements and frequencies per hemisphere
+            "hemisphere_energy": energy,
             "artifacts": {
                 name: str(path.relative_to(output_dir)) for name, path in artifacts.items()
             },

@@ -46,6 +46,30 @@ def reshape_planar_column_first(
     return out
 
 
+def split_pattern_axis(
+    rx_ant_flat: np.ndarray,
+    *,
+    num_patterns: int,
+    rows: int,
+    cols: int,
+) -> np.ndarray:
+    """Split Sionna's fused receive axis into ``[pattern, row, col, ...]``.
+
+    Sionna fuses the antenna-pattern axis with the array axis pattern-major:
+    receive channel ``p * rows * cols + a`` is antenna ``a`` (column-first
+    numbering) seen through pattern ``p``. The RF camera uses the two pattern
+    slots for the front and back hemispheres.
+    """
+    rx_ant_flat = np.asarray(rx_ant_flat)
+    size = rows * cols
+    if rx_ant_flat.shape[0] != num_patterns * size:
+        raise ValueError(
+            f"Expected {num_patterns} x {size} receive channels, got {rx_ant_flat.shape[0]}"
+        )
+    patterns = rx_ant_flat.reshape((num_patterns, size) + rx_ant_flat.shape[1:])
+    return np.stack([reshape_planar_column_first(p, rows=rows, cols=cols) for p in patterns])
+
+
 def aperture_to_angular_fft(
     aperture_cfr: np.ndarray,
     *,

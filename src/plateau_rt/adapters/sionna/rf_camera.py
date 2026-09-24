@@ -144,14 +144,14 @@ class RFCameraMVP:
             seed=cfg.seed,
         )
         frequency_offsets_hz = frequency_offsets(cfg.bandwidth_hz, cfg.num_frequency_bins)
-        # Shape: [row, col, frequency]
+        # Single receiver, single (dipole) pattern -> [row, col, frequency]
         aperture_cfr = aperture_cfrs(
             paths,
             frequency_offsets_hz,
             num_rx=1,
             rx_rows=cfg.rx_rows,
             rx_cols=cfg.rx_cols,
-        )[0]
+        )[0, 0]
         print(f"aperture_cfr shape={aperture_cfr.shape}, dtype={aperture_cfr.dtype}")
 
         angular_cfr = aperture_to_angular_fft(

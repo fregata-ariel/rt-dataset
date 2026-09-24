@@ -4,6 +4,7 @@ from plateau_rt.domain.rf_camera.imaging import (
     aperture_to_angular_fft,
     frequency_offsets,
     reshape_planar_column_first,
+    split_pattern_axis,
 )
 
 
@@ -44,3 +45,15 @@ def test_spatial_fft_finds_known_phase_ramp_bin():
 
     # fftshift puts DC at rows//2, cols//2.
     assert peak == (rows // 2 + row_bin, cols // 2 + col_bin)
+
+
+def test_pattern_axis_is_split_pattern_major_then_column_first():
+    # Sionna fuses [pattern, antenna]: channel p * rows * cols + a.
+    rows, cols = 3, 2
+    flat = np.arange(2 * rows * cols, dtype=np.float32)[:, None]
+
+    split = split_pattern_axis(flat, num_patterns=2, rows=rows, cols=cols)
+
+    assert split.shape == (2, rows, cols, 1)
+    np.testing.assert_array_equal(split[0, :, :, 0], [[0.0, 3.0], [1.0, 4.0], [2.0, 5.0]])
+    np.testing.assert_array_equal(split[1, :, :, 0], [[6.0, 9.0], [7.0, 10.0], [8.0, 11.0]])
