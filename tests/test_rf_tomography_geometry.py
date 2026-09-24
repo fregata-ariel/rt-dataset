@@ -6,6 +6,7 @@ from scipy.constants import c as SPEED_OF_LIGHT
 
 from plateau_rt.domain.rf_camera.camera import look_at_orientation
 from plateau_rt.domain.rf_camera.imaging import reshape_planar_column_first
+from plateau_rt.domain.rf_tomography.antenna import bs_orientation
 from plateau_rt.domain.rf_tomography.geometry import (
     CaptureGeometry,
     VoxelGrid,
@@ -384,3 +385,116 @@ def test_nested_view_order() -> None:
         nested_view_order(0, 0)
     with pytest.raises(ValueError):
         nested_view_order(8, -1)
+
+
+def _bs_rot_base() -> dict[str, object]:
+    return {
+        "ue_pos": np.zeros((1, 3)),
+        "ue_rot": np.eye(3)[None, :, :],
+        "bs_pos": np.array([[1.0, 2.0, 3.0]]),
+        "elem_offsets": np.zeros((64, 3)),
+        "freq_offsets": np.array([-1e6, -0.5e6, 0.0, 0.5e6]),
+        "f_c": 3.5e9,
+        "aperture_shape": (8, 8),
+    }
+
+
+def test_capture_geometry_bs_rot_validation() -> None:
+    base = _bs_rot_base()
+
+    valid = np.eye(3)[None, :, :]
+    geometry = CaptureGeometry(**{**base, "bs_rot": valid})  # type: ignore[arg-type]
+    assert geometry.bs_rot is not None
+    assert geometry.bs_rot.dtype == np.float64
+    assert geometry.bs_rot.flags.writeable is False
+    np.testing.assert_array_equal(geometry.bs_rot, valid)
+
+    assert CaptureGeometry(**{**base, "bs_rot": None}).bs_rot is None  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError):
+        CaptureGeometry(**{**base, "bs_rot": np.eye(3)})  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        bad = np.eye(3)[None, :, :].copy()
+        bad[0, 0, 0] = np.nan
+        CaptureGeometry(**{**base, "bs_rot": bad})  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        CaptureGeometry(**{**base, "bs_rot": np.diag([1.0, 1.0, -1.0])[None, :, :]})  # type: ignore[arg-type]
+
+
+def test_from_orientations_bs_look_at() -> None:
+    ue_pos = np.zeros((2, 3))
+    ue_orientations = np.zeros((2, 3))
+    bs_pos = np.array([[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    shared = np.array([0.0, 0.0, 0.0])
+    targets = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]])
+
+    geometry = CaptureGeometry.from_orientations(
+        ue_pos,
+        ue_orientations,
+        bs_pos,
+        f_c=3.5e9,
+        bandwidth=100e6,
+        num_bins=8,
+        bs_look_at=shared,
+    )
+    assert geometry.bs_rot is not None
+    for b in range(2):
+        np.testing.assert_allclose(
+            geometry.bs_rot[b], bs_orientation(bs_pos[b], shared), atol=1e-15
+        )
+
+    per_bs = CaptureGeometry.from_orientations(
+        ue_pos,
+        ue_orientations,
+        bs_pos,
+        f_c=3.5e9,
+        bandwidth=100e6,
+        num_bins=8,
+        bs_look_at=targets,
+    )
+    assert per_bs.bs_rot is not None
+    for b in range(2):
+        np.testing.assert_allclose(
+            per_bs.bs_rot[b], bs_orientation(bs_pos[b], targets[b]), atol=1e-15
+        )
+
+    without = CaptureGeometry.from_orientations(
+        ue_pos, ue_orientations, bs_pos, f_c=3.5e9, bandwidth=100e6, num_bins=8
+    )
+    assert without.bs_rot is None
+
+    with pytest.raises(ValueError):
+        CaptureGeometry.from_orientations(
+            ue_pos,
+            ue_orientations,
+            bs_pos,
+            f_c=3.5e9,
+            bandwidth=100e6,
+            num_bins=8,
+            bs_look_at=np.zeros(4),
+        )
+
+
+def test_select_keeps_bs_rot() -> None:
+    ue_pos = np.zeros((2, 3))
+    ue_orientations = np.zeros((2, 3))
+    bs_pos = np.array([[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+    targets = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]])
+    geometry = CaptureGeometry.from_orientations(
+        ue_pos,
+        ue_orientations,
+        bs_pos,
+        f_c=3.5e9,
+        bandwidth=100e6,
+        num_bins=8,
+        bs_look_at=targets,
+    )
+    selected = geometry.select(bss=[1])
+    assert geometry.bs_rot is not None
+    assert selected.bs_rot is not None
+    np.testing.assert_array_equal(selected.bs_rot, geometry.bs_rot[[1]])
+
+    without = CaptureGeometry.from_orientations(
+        ue_pos, ue_orientations, bs_pos, f_c=3.5e9, bandwidth=100e6, num_bins=8
+    )
+    assert without.select(bss=[1]).bs_rot is None

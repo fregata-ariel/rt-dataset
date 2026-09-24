@@ -15,6 +15,7 @@ from scipy.constants import c as SPEED_OF_LIGHT
 
 from plateau_rt.domain.rf_camera.calibration import rotation_matrix
 from plateau_rt.domain.rf_camera.imaging import frequency_offsets, uniform_frequency_spacing
+from plateau_rt.domain.rf_tomography.antenna import bs_orientation
 
 LOS_VS_TOLERANCE_M: float = 1e-9
 
@@ -186,6 +187,20 @@ def rotations_from_orientations(orientations: np.ndarray) -> np.ndarray:
     return np.stack([rotation_matrix(tuple(row)) for row in orientations], axis=0)
 
 
+def _bs_rotations(bs_pos: np.ndarray, bs_look_at: np.ndarray | None) -> np.ndarray | None:
+    """Return look-at BS rotations ``[B, 3, 3]`` or ``None`` when no target is given."""
+    if bs_look_at is None:
+        return None
+    positions = np.asarray(bs_pos, dtype=np.float64)
+    targets = np.asarray(bs_look_at, dtype=np.float64)
+    num_bs = positions.shape[0] if positions.ndim == 2 else 0
+    if targets.shape == (3,):
+        targets = np.broadcast_to(targets, (num_bs, 3))
+    if targets.shape != (num_bs, 3):
+        raise ValueError("bs_look_at must have shape [3] or [B, 3]")
+    return np.stack([bs_orientation(positions[b], targets[b]) for b in range(num_bs)], axis=0)
+
+
 def hemisphere_index(u_local: np.ndarray) -> np.ndarray:
     """Return 0 for the front hemisphere (``u_x >= 0``) and 1 for the back."""
     u_local = np.asarray(u_local, dtype=np.float64)
@@ -260,6 +275,7 @@ class CaptureGeometry:
     ``ue_rot[v]`` is ``world_from_local`` (columns are the local x, y, z axes).
     ``freq_offsets`` is the baseband grid with DC at index ``N // 2`` and
     ``elem_offsets[m]`` uses the row-major element order ``m = r * cols + col``.
+    ``bs_rot`` holds the optional ``world_from_local`` orientation of each BS.
     """
 
     ue_pos: np.ndarray
@@ -269,6 +285,7 @@ class CaptureGeometry:
     freq_offsets: np.ndarray
     f_c: float
     aperture_shape: tuple[int, int] = (8, 8)
+    bs_rot: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         ue_pos = _readonly_float64(self.ue_pos)
@@ -317,6 +334,20 @@ class CaptureGeometry:
         if not np.isfinite(f_c) or f_c <= 0.0:
             raise ValueError("f_c must be finite and > 0")
 
+        bs_rot: np.ndarray | None = None
+        if self.bs_rot is not None:
+            bs_rot_array = _readonly_float64(self.bs_rot)
+            if bs_rot_array.shape != (bs_pos.shape[0], 3, 3):
+                raise ValueError("bs_rot must have shape [B, 3, 3]")
+            if not np.all(np.isfinite(bs_rot_array)):
+                raise ValueError("bs_rot must contain only finite values")
+            gram_bs = np.einsum("bji,bjk->bik", bs_rot_array, bs_rot_array)
+            if np.max(np.abs(gram_bs - np.eye(3))) > 1e-9 or np.any(
+                np.linalg.det(bs_rot_array) <= 0.0
+            ):
+                raise ValueError("each bs_rot[b] must be a proper rotation")
+            bs_rot = bs_rot_array
+
         object.__setattr__(self, "ue_pos", ue_pos)
         object.__setattr__(self, "ue_rot", ue_rot)
         object.__setattr__(self, "bs_pos", bs_pos)
@@ -324,6 +355,7 @@ class CaptureGeometry:
         object.__setattr__(self, "freq_offsets", freq_offsets)
         object.__setattr__(self, "f_c", f_c)
         object.__setattr__(self, "aperture_shape", aperture_shape)
+        object.__setattr__(self, "bs_rot", bs_rot)
 
     @classmethod
     def from_orientations(
@@ -337,11 +369,13 @@ class CaptureGeometry:
         num_bins: int,
         aperture_shape: tuple[int, int] = (8, 8),
         spacing_lambda: float = 0.5,
+        bs_look_at: np.ndarray | None = None,
     ) -> CaptureGeometry:
         """Build a geometry from Sionna Euler orientations and a frequency grid.
 
         The frequency offsets reuse the float32 grid traced by Sionna, promoted
-        to float64.
+        to float64. When ``bs_look_at`` is given (``[3]`` shared by all BSs or
+        ``[B, 3]`` per BS), each BS orientation is the look-at rotation.
         """
         try:
             rows, cols = (int(value) for value in aperture_shape)
@@ -356,6 +390,7 @@ class CaptureGeometry:
             wavelength, rows=rows, cols=cols, spacing_lambda=spacing_lambda
         )
         freq = frequency_offsets(bandwidth, num_bins).astype(np.float64)
+        bs_rot = _bs_rotations(bs_pos, bs_look_at)
         return cls(
             ue_pos=ue_pos,
             ue_rot=ue_rot,
@@ -364,6 +399,7 @@ class CaptureGeometry:
             freq_offsets=freq,
             f_c=f_c,
             aperture_shape=(rows, cols),
+            bs_rot=bs_rot,
         )
 
     def select(
@@ -382,6 +418,7 @@ class CaptureGeometry:
             freq_offsets=self.freq_offsets,
             f_c=self.f_c,
             aperture_shape=self.aperture_shape,
+            bs_rot=None if self.bs_rot is None else self.bs_rot[bs_indices],
         )
 
     @property
