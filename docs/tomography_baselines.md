@@ -1,6 +1,6 @@
 # RF tomography baselines: intensity, delay, phase, all hybrids, simultaneous and non-simultaneous capture
 
-Target file: `docs/tomography_baselines.md`. Status: design only; nothing is implemented yet. This document merges three independent proposals: a physics and signal-processing design, a hybrid-fusion design, and an evaluation-and-data design. §1.4 records each conflict between them and why it was resolved the way it was. This revision also resolves the critique of the first draft. The main changes are:
+Target file: `docs/tomography_baselines.md`. Status: design approved 2026-09-25 (all §9.2 defaults adopted); Phase 0 is being implemented on `explore/tomography-p0`. This document merges three independent proposals: a physics and signal-processing design, a hybrid-fusion design, and an evaluation-and-data design. §1.4 records each conflict between them and why it was resolved the way it was. This revision also resolves the critique of the first draft. The main changes are:
 
 - a LoS atom with its phase fixed by the model;
 - a phase-only global gauge;
@@ -1053,9 +1053,9 @@ Each task touches one or two source files, has explicit I/O and numeric acceptan
 - **Compute.** CPU E2 is bounded by pruning (§4.1). Full-grid runs depend on T33.
 - **Hyperparameter sensitivity** across about 70 rows. Handled by the frozen validation protocol and equal budgets.
 
-### 9.2 Decisions needed from the user
+### 9.2 Decisions
 
-Defaults in brackets.
+Decided 2026-09-25: every default below (in brackets) was adopted.
 
 1. **Letter semantics and the lattice.** Read I = amplitude, D = time of flight, P = carrier phase, with the camera's angle resolution always available. Add three lattice-completion nodes (I@n0, P_W, IP_W) so the "value of each type" analysis is not confounded by data volume. [Yes.]
 2. **Elevated UEs.** Without elevated UEs, camera configurations still localise in 3D, but vertical precision is limited to about r·Δu_z (≈ 10 m at 40 m), and omni range-only configurations have a z-mirror ambiguity. [Measure this with M7/M8 on L2 first; add 10/25 m UEs only if the vertical error dominates. I-T deferred.]

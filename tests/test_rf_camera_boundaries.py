@@ -1,5 +1,9 @@
+import pkgutil
 import subprocess
 import sys
+from pathlib import Path
+
+import plateau_rt.domain.rf_tomography as rf_tomography
 
 # RF-camera math and directory post-processing must stay usable without a
 # Sionna/Mitsuba scene (CPU-only analysis, lightweight unit tests).
@@ -27,6 +31,11 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.experimental.rf_scatterer_fit",
     "plateau_rt.experimental.rf_scatterer_study",
     "plateau_rt.experimental.compare_direct_path",
+    # Every tomography module (docs/tomography_baselines.md §7.3).
+    *(
+        f"{rf_tomography.__name__}.{info.name}"
+        for info in pkgutil.iter_modules([str(Path(rf_tomography.__file__).parent)])
+    ),
 ]
 
 
