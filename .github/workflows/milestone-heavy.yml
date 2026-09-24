@@ -15,9 +15,12 @@ on:
 permissions:
   contents: read
 
-# GPU は1枚なので重い処理は直列に実行し、途中キャンセルもしない
+# 同じ ref の重い処理は直列に実行し、途中キャンセルもしない。
+# グループを ref ごとに分けるのは、共通グループだと待機が1件しか保持されず
+# (3件目の投入で待機中の実行がキャンセルされる)、複数ブランチを並べられないため。
+# ランナーは1台なので、ブランチをまたいだジョブもランナー側で順番待ちになり GPU は競合しない。
 concurrency:
-  group: milestone-heavy-gpu
+  group: milestone-heavy-${{ github.ref }}
   cancel-in-progress: false
 
 env:
