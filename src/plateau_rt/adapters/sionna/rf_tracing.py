@@ -52,17 +52,36 @@ def configure_rf_camera_arrays(
     )
 
 
-def trace_paths(scene: Any, *, max_depth: int, synthetic_array: bool, seed: int) -> Any:
-    """Trace LoS, specular reflection and refraction paths for all Tx/Rx."""
+def trace_paths(
+    scene: Any,
+    *,
+    max_depth: int,
+    synthetic_array: bool,
+    seed: int,
+    los: bool = True,
+    specular_reflection: bool = True,
+    diffuse_reflection: bool = False,
+    refraction: bool = True,
+    diffraction: bool = False,
+    edge_diffraction: bool = False,
+    samples_per_src: int | None = None,
+) -> Any:
+    """Trace paths for all Tx/Rx with configurable PathSolver flags."""
+    kwargs: dict[str, Any] = {}
+    if samples_per_src is not None:
+        kwargs["samples_per_src"] = samples_per_src
     return PathSolver()(
         scene=scene,
         max_depth=max_depth,
-        los=True,
-        specular_reflection=True,
-        diffuse_reflection=False,
-        refraction=True,
+        los=los,
+        specular_reflection=specular_reflection,
+        diffuse_reflection=diffuse_reflection,
+        refraction=refraction,
+        diffraction=diffraction,
+        edge_diffraction=edge_diffraction,
         synthetic_array=synthetic_array,
         seed=seed,
+        **kwargs,
     )
 
 

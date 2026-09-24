@@ -10,11 +10,13 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.domain.rf_camera.gauge",
     "plateau_rt.domain.rf_camera.camera",
     "plateau_rt.domain.rf_camera.optical",
+    "plateau_rt.domain.rf_camera.solver_metrics",
+    "plateau_rt.domain.ground",
     "plateau_rt.application.rf_camera_calibration",
     "plateau_rt.application.rf_camera_delay",
     "plateau_rt.application.optical_reference",
-    "plateau_rt.domain.ground",
     "plateau_rt.application.scene_checks",
+    "plateau_rt.application.solver_profile_report",
 ]
 
 
