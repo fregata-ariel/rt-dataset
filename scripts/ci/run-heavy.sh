@@ -38,7 +38,7 @@ rm -rf "${MOCK_OUT}"
 gpu_run make MOCK_OUT="${MOCK_OUT}/" \
   run-all-mock render-mock \
   rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock \
-  rf-camera-multiview-mock rf-camera-optical-mock
+  rf-camera-multiview-mock rf-camera-optical-mock rf-camera-partial-mock
 
 echo "🔍 Step 5: Validate generated outputs"
 # ビュー数・BS数は Makefile の rf-camera-multiview-mock (--num-views 8,

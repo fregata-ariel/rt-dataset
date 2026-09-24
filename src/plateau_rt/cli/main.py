@@ -381,6 +381,62 @@ def rf_camera_observe(
     click.echo(click.style(f"Observed dataset manifest: {manifest_path}", fg="green"))
 
 
+@cli.command("rf-camera-partial")
+@click.argument("dataset_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("out_dir", type=click.Path(file_okay=False, path_type=Path))
+@click.option("--view-fraction", type=float, default=1.0, show_default=True)
+@click.option(
+    "--element-mask",
+    "element_mask_kind",
+    type=click.Choice(["none", "random", "every_other_row", "every_other_col", "checkerboard"]),
+    default="none",
+    show_default=True,
+)
+@click.option("--mask-fraction", type=float, default=0.5, show_default=True)
+@click.option("--subband", type=str, default=None, show_default=True)
+@click.option(
+    "--summary", type=click.Choice(["none", "power", "delay"]), default="none", show_default=True
+)
+@click.option("--seed", type=int, default=0, show_default=True)
+@click.option(
+    "--overwrite",
+    is_flag=True,
+    default=False,
+    show_default=True,
+    help="既存の部分出力 (partial_manifest.json / element_mask.npy / views) を置き換える",
+)
+def rf_camera_partial(
+    dataset_dir: Path,
+    out_dir: Path,
+    view_fraction: float,
+    element_mask_kind: str,
+    mask_fraction: float,
+    subband: str | None,
+    summary: str,
+    seed: int,
+    overwrite: bool,
+):
+    """マルチビューRFカメラデータセットから部分/要約観測データセットを生成します。"""
+    from plateau_rt.application.rf_camera_partial import build_partial_dataset
+    from plateau_rt.application.rf_dataset_manifest import ManifestError
+
+    try:
+        manifest_path = build_partial_dataset(
+            dataset_dir,
+            out_dir,
+            view_fraction=view_fraction,
+            element_mask_kind=element_mask_kind,
+            mask_fraction=mask_fraction,
+            subband=subband,
+            summary=summary,
+            seed=seed,
+            overwrite=overwrite,
+        )
+    except (ManifestError, ValueError, FileExistsError, FileNotFoundError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(click.style(f"Success! Partial manifest generated at: {manifest_path}", fg="green"))
+
+
 @cli.command("render")
 @click.argument("input_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
 def render_heatmaps(input_dir: Path):

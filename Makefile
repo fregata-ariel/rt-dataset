@@ -1,4 +1,4 @@
-.PHONY: build-mock sim-mock render-mock view-mock run-all-mock rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock rf-camera-multiview-mock rf-camera-optical-mock rf-camera-observe-mock clean build-mock-city rf-camera-multiview-mock-city
+.PHONY: build-mock sim-mock render-mock view-mock run-all-mock rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock rf-camera-multiview-mock rf-camera-optical-mock rf-camera-observe-mock rf-camera-partial-mock clean build-mock-city rf-camera-multiview-mock-city
 
 # PYTHONPATHを設定
 PYTHON := PYTHONPATH=./src/ python
@@ -10,6 +10,7 @@ MOCK_XML  := $(MOCK_OUT)/mock_building.city.xml
 MOCK_MANI := $(MOCK_OUT)/manifest.json
 RF_CAMERA_OUT := $(MOCK_OUT)/rf_camera/
 RF_CAMERA_MULTIVIEW_OUT := $(MOCK_OUT)/rf_camera_multiview/
+RF_CAMERA_PARTIAL_OUT := $(MOCK_OUT)/rf_camera_partial/
 MOCK_CITY_JSON := data/raw/mock_city.city.json
 MOCK_CITY_OUT  := $(MOCK_OUT)/mock_city/
 MOCK_CITY_XML  := $(MOCK_CITY_OUT)/mock_city.city.xml
@@ -46,6 +47,10 @@ rf-camera-multiview-mock: build-mock
 
 rf-camera-optical-mock:
 	$(PYTHON) -m plateau_rt.cli.main rf-camera-optical $(RF_CAMERA_MULTIVIEW_OUT)
+
+rf-camera-partial-mock:
+	$(PYTHON) -m plateau_rt.cli.main rf-camera-partial $(RF_CAMERA_MULTIVIEW_OUT) $(RF_CAMERA_PARTIAL_OUT) \
+		--view-fraction 0.5 --element-mask checkerboard --summary delay --overwrite
 
 build-mock-city:
 	$(PYTHON) -m plateau_rt.cli.main build $(MOCK_CITY_JSON) $(MOCK_CITY_OUT) --ground-plane-size-m 200

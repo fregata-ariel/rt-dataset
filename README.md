@@ -19,7 +19,8 @@ CityJSON ──build──▶ PLY + Mitsuba XML + manifest.json
                       │
                       └─ rf-camera-multiview ──▶ views/*/rf/ + camera_model.npz + dataset_manifest.json
                                                     │
-                                                    └─ rf-camera-optical ──▶ views/*/optical/ + transforms.json
+                                                    ├─ rf-camera-optical ──▶ views/*/optical/ + transforms.json
+                                                    └─ rf-camera-partial ──▶ 部分/要約観測 + partial_manifest.json
 ```
 
 ## 環境構築
@@ -77,6 +78,7 @@ VS Code で「Dev Containers: Reopen in Container」を実行すると、dev イ
 | `make rf-camera-delay-mock` | 角度-遅延ボリュームへの展開 (GPU 不要) |
 | `make rf-camera-multiview-mock` | 1 BS / 8 UE のマルチビューデータセット |
 | `make rf-camera-optical-mock` | マルチビューデータセットに光学参照レンダーを追加 |
+| `make rf-camera-partial-mock` | マルチビューデータセットから部分/要約観測データセットを生成 |
 | `make build-mock-city` | 4棟モックシティ + 200 m 地面プレーン → PLY / Mitsuba XML / manifest.json |
 | `make rf-camera-multiview-mock-city` | モックシティの 1 BS / 12 UE マルチビューデータセット |
 | `make clean` | 生成物の削除 |
@@ -98,6 +100,7 @@ PYTHONPATH=./src python -m plateau_rt.cli.main --help
 | `rf-camera-delay DIR` | 校正済み出力を角度-遅延ボリュームに展開 |
 | `rf-camera-multiview XML OUTPUT_DIR` | リング配置の multi-UE データセット |
 | `rf-camera-optical DATASET_DIR` | マルチビューデータセットに位置合わせ済みの光学参照レンダーを追加 |
+| `rf-camera-partial DATASET_DIR OUT_DIR` | マルチビューデータセットから部分/要約観測データセットを生成 |
 
 各オプションは `--help` を参照してください。RF カメラの観測モデル・座標系・出力形式は
 次のドキュメントにまとめています。
@@ -105,6 +108,7 @@ PYTHONPATH=./src python -m plateau_rt.cli.main --help
 - [docs/rf_camera_mvp.md](docs/rf_camera_mvp.md): 1 BS / 1 UE、校正、角度-遅延
 - [docs/rf_camera_multiview.md](docs/rf_camera_multiview.md): マルチビューデータセットとカメラモデル
 - [docs/optical_reference.md](docs/optical_reference.md): 光学参照レンダー (issue #11)、3DGS 学習との接続
+- [docs/rf_camera_partial.md](docs/rf_camera_partial.md): 部分/要約観測データセット (issue #14 の基礎モデル学習用)
 
 ## コード構成
 
