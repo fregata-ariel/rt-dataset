@@ -74,10 +74,11 @@ from typing import Any
 import numpy as np
 from scipy.sparse.linalg import LinearOperator
 
-from plateau_rt.domain.rf_tomography.backproject import _aperture_spacing, _singular_mask
+from plateau_rt.domain.rf_tomography.backproject import _aperture_spacing
 from plateau_rt.domain.rf_tomography.forward_exact import (
     SPACES,
     _prepare_points,
+    _singular_mask,
     capture_factors,
 )
 from plateau_rt.domain.rf_tomography.geometry import CaptureGeometry, VoxelGrid

@@ -629,6 +629,10 @@ def test_validation_errors() -> None:
         atom_cfr(points, np.ones(3), geom, "vs", pattern="iso")
     with pytest.raises(ValueError):
         atom_cfr(np.array([[np.nan, 0.0, 0.0]]), amps, geom, "vs", pattern="iso")
+    # Negative or out-of-range capture indices must not wrap around silently.
+    for v, b in ((-1, 0), (geom.num_views, 0), (0, -1), (0, geom.num_bs)):
+        with pytest.raises(ValueError):
+            capture_factors(points, geom, "vs", v, b, pattern="iso")
 
     accepted = atom_cfr(plain.bs_pos[0], [1.0], plain, "vs", pattern="iso", polarization="none")
     assert accepted.shape == (plain.num_views, plain.num_bs, 2, 8, 8, plain.num_bins)

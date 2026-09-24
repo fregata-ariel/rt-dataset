@@ -43,14 +43,20 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from plateau_rt.domain.rf_tomography.forward_exact import SPACES, capture_factors
-from plateau_rt.domain.rf_tomography.geometry import (
-    LOS_VS_TOLERANCE_M,
-    CaptureGeometry,
-    planar_element_offsets,
+from plateau_rt.domain.rf_tomography.forward_exact import (
+    SPACES,
+    _capture_index,
+    _prepare_points,
+    _singular_mask,
+    capture_factors,
 )
+from plateau_rt.domain.rf_tomography.geometry import CaptureGeometry, planar_element_offsets
 from plateau_rt.domain.rf_tomography.interp import INTERP_KINDS, gather, periodic_weights
-from plateau_rt.domain.rf_tomography.observables import angle_delay_volume, volume_axes
+from plateau_rt.domain.rf_tomography.observables import (
+    _validate_oversample,
+    angle_delay_volume,
+    volume_axes,
+)
 
 POINT_CHUNK: int = 65_536
 WINDOWS: tuple[str | None, ...] = (None, "taylor")
@@ -113,33 +119,6 @@ def _validate_h(h: int) -> int:
     return index
 
 
-def _validate_index(value: int, size: int, name: str) -> int:
-    """Return ``value`` as an int in ``[0, size)``, else raise ``ValueError``."""
-    try:
-        index = int(value)
-    except (TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be an integer in [0, {size})") from error
-    if index < 0 or index >= size:
-        raise ValueError(f"{name} must be an integer in [0, {size})")
-    return index
-
-
-def _points_array(points: np.ndarray) -> np.ndarray:
-    """Return finite ``[P, 3]`` float64 points, promoting a single ``[3]`` point."""
-    arr = np.asarray(points, dtype=np.float64)
-    if arr.ndim == 1:
-        if arr.shape[0] != 3:
-            raise ValueError("points must have shape [P, 3] or [3]")
-        arr = arr[None, :]
-    if arr.ndim != 2 or arr.shape[1] != 3:
-        raise ValueError("points must have shape [P, 3] or [3]")
-    if arr.shape[0] < 1:
-        raise ValueError("points must contain at least one point")
-    if not np.all(np.isfinite(arr)):
-        raise ValueError("points must contain only finite values")
-    return arr
-
-
 def _validate_y(Y: np.ndarray, geom: CaptureGeometry) -> None:
     """Raise ``ValueError`` unless ``Y`` matches the geometry's capture layout."""
     expected = (
@@ -152,24 +131,6 @@ def _validate_y(Y: np.ndarray, geom: CaptureGeometry) -> None:
     )
     if np.asarray(Y).shape != expected:
         raise ValueError(f"Y must have shape {expected}")
-
-
-def _validate_oversample(oversample: tuple[int, int]) -> tuple[int, int]:
-    """Return the validated ``(angle, delay)`` oversampling pair."""
-    try:
-        values = tuple(oversample)
-    except TypeError as error:
-        raise ValueError("oversample must be a pair of integers >= 1") from error
-    if len(values) != 2:
-        raise ValueError("oversample must be a pair of integers >= 1")
-    factors = []
-    for value in values:
-        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
-            raise ValueError("oversample factors must be integers")
-        if int(value) < 1:
-            raise ValueError("oversample factors must be >= 1")
-        factors.append(int(value))
-    return factors[0], factors[1]
 
 
 def _aperture_spacing(geom: CaptureGeometry) -> float:
@@ -211,17 +172,6 @@ def _capture_axes(geom: CaptureGeometry, oversample: tuple[int, int]) -> _Axes:
         u_y=u_y,
         u_z=u_z,
     )
-
-
-def _singular_mask(points: np.ndarray, geom: CaptureGeometry, space: str) -> np.ndarray:
-    """Return the ``[P]`` mask of points where ``capture_factors`` would raise (step 6)."""
-    mask = np.zeros(points.shape[0], dtype=bool)
-    for ue in geom.ue_pos:
-        mask |= np.linalg.norm(points - ue, axis=-1) <= LOS_VS_TOLERANCE_M
-    if space == "bv":
-        for bs in geom.bs_pos:
-            mask |= np.linalg.norm(points - bs, axis=-1) <= LOS_VS_TOLERANCE_M
-    return mask
 
 
 def _carrier_factor(
@@ -295,8 +245,8 @@ def capture_volume(
     integer-element shift ``pre`` is applied to its angular axes.
     """
     _validate_window(window)
-    v = _validate_index(v, geom.num_views, "v")
-    b = _validate_index(b, geom.num_bs, "b")
+    v = _capture_index(v, geom.num_views, "v")
+    b = _capture_index(b, geom.num_bs, "b")
     _validate_y(Y, geom)
     axes = _capture_axes(geom, oversample)
 
@@ -331,9 +281,9 @@ def capture_lookup(
     _validate_space(space)
     _validate_kind(kind)
     h = _validate_h(h)
-    v = _validate_index(v, geom.num_views, "v")
-    b = _validate_index(b, geom.num_bs, "b")
-    pts = _points_array(points)
+    v = _capture_index(v, geom.num_views, "v")
+    b = _capture_index(b, geom.num_bs, "b")
+    pts = _prepare_points(points)
     axes = _capture_axes(geom, oversample)
     singular = _singular_mask(pts, geom, space)
 
@@ -403,7 +353,7 @@ def backproject(
     _validate_space(space)
     _validate_kind(kind)
     _validate_window(window)
-    pts = _points_array(points)
+    pts = _prepare_points(points)
     _validate_y(Y, geom)
     axes = _capture_axes(geom, oversample)
 

@@ -37,6 +37,7 @@ from plateau_rt.domain.rf_tomography.geometry import (
     LOS_VS_TOLERANCE_M,
     CaptureGeometry,
 )
+from plateau_rt.domain.rf_tomography.sync import gauge_factor
 
 BETA_MODELS: tuple[str, ...] = ("shared", "per_view", "constrained")
 CONSTRAINED_DEGREE: int = 2
@@ -275,7 +276,7 @@ class SeparableOperator:
         if gauge is None:
             return None
         phi, tau = gauge
-        return np.exp(1j * phi[v, b]) * np.exp(-2j * np.pi * self._df * tau[v, b])
+        return gauge_factor(phi[v, b], tau[v, b], self._df)
 
     def _beta(self, x: np.ndarray, capture: _Capture) -> np.ndarray:
         """Return the per-point amplitude ``beta_c[p]`` [P] (permuted order)."""

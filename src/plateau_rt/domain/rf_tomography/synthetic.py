@@ -18,6 +18,7 @@ from scipy.constants import epsilon_0 as EPSILON_0
 
 from plateau_rt.domain.rf_camera.camera import generate_ring_views
 from plateau_rt.domain.rf_tomography.forward_exact import (
+    SPACES,
     atom_cfr,
     capture_factors,
     dense_matrix,
@@ -332,8 +333,8 @@ def mismatch_floor_prediction(
     if amp.ndim != 1 or amp.shape[0] != pts.shape[0]:
         raise ValueError("amps must have shape [K]")
     amp = amp.astype(np.complex128)
-    if space not in ("bv", "vs"):
-        raise ValueError("space must be 'bv' or 'vs'")
+    if space not in SPACES:
+        raise ValueError(f"space must be one of {SPACES}")
     num_elements = geom.num_elements
     num_bins = geom.num_bins
     if elem_offsets_true is None:

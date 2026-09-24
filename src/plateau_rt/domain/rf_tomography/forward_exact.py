@@ -20,6 +20,7 @@ from plateau_rt.domain.rf_tomography.antenna import PATTERN_KINDS, bs_pattern
 from plateau_rt.domain.rf_tomography.geometry import (
     LOS_VS_TOLERANCE_M,
     CaptureGeometry,
+    _as_points,
     hemisphere_index,
 )
 
@@ -45,14 +46,8 @@ class CaptureFactors:
 
 
 def _prepare_points(points: np.ndarray) -> np.ndarray:
-    """Return finite ``[P, 3]`` float64 points, promoting a single ``[3]`` point."""
-    pts = np.asarray(points, dtype=np.float64)
-    if pts.ndim == 1:
-        if pts.shape[0] != 3:
-            raise ValueError("points must have shape [P, 3] or [3]")
-        pts = pts[None, :]
-    if pts.ndim != 2 or pts.shape[1] != 3:
-        raise ValueError("points must have shape [P, 3] or [3]")
+    """Return finite ``[P, 3]`` float64 points (P >= 1), promoting a single ``[3]`` point."""
+    pts = _as_points(points)
     if pts.shape[0] < 1:
         raise ValueError("points must contain at least one point")
     if not np.all(np.isfinite(pts)):
@@ -78,11 +73,25 @@ def _validate_choice(value: str, allowed: tuple[str, ...], name: str) -> None:
         raise ValueError(f"{name} must be one of {allowed}, got {value!r}")
 
 
+def _singular_mask(points: np.ndarray, geom: CaptureGeometry, space: str) -> np.ndarray:
+    """Return the ``[P]`` mask of points :func:`capture_factors` rejects.
+
+    A point is singular within ``LOS_VS_TOLERANCE_M`` of any UE (both spaces) or
+    of any BS (``"bv"`` only; in ``"vs"`` a point at a BS is the LoS source).
+    """
+    mask = np.zeros(points.shape[0], dtype=bool)
+    for ue in geom.ue_pos:
+        mask |= np.linalg.norm(points - ue, axis=-1) <= LOS_VS_TOLERANCE_M
+    if space == "bv":
+        for bs in geom.bs_pos:
+            mask |= np.linalg.norm(points - bs, axis=-1) <= LOS_VS_TOLERANCE_M
+    return mask
+
+
 def _reject_points_on_ue(points: np.ndarray, geom: CaptureGeometry) -> None:
     """Raise ``ValueError`` if a point coincides with any UE position."""
-    for ue in geom.ue_pos:
-        if np.any(np.linalg.norm(points - ue, axis=-1) <= LOS_VS_TOLERANCE_M):
-            raise ValueError("a point coincides with a UE position")
+    if np.any(_singular_mask(points, geom, "vs")):
+        raise ValueError("a point coincides with a UE position")
 
 
 def _reject_points_on_bs(points: np.ndarray, geom: CaptureGeometry) -> None:
@@ -90,6 +99,17 @@ def _reject_points_on_bs(points: np.ndarray, geom: CaptureGeometry) -> None:
     for bs in geom.bs_pos:
         if np.any(np.linalg.norm(points - bs, axis=-1) <= LOS_VS_TOLERANCE_M):
             raise ValueError("a BV point coincides with a BS position")
+
+
+def _capture_index(value: int, size: int, name: str) -> int:
+    """Return ``value`` as an int in ``[0, size)`` (negative indices are rejected)."""
+    try:
+        index = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be an integer in [0, {size})") from error
+    if index != value or not 0 <= index < size:
+        raise ValueError(f"{name} must be an integer in [0, {size})")
+    return index
 
 
 def _v_pol_unit(local_dir: np.ndarray) -> np.ndarray:
@@ -154,6 +174,8 @@ def capture_factors(
     _validate_choice(space, SPACES, "space")
     _validate_choice(polarization, POLARIZATIONS, "polarization")
     _validate_choice(pattern, PATTERN_KINDS, "pattern")
+    v = _capture_index(v, geom.num_views, "v")
+    b = _capture_index(b, geom.num_bs, "b")
     if (pattern == "tr38901" or polarization == "vv") and geom.bs_rot is None:
         raise ValueError("tr38901 pattern and vv polarization require geom.bs_rot")
     _reject_points_on_ue(pts, geom)
