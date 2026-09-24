@@ -1,6 +1,6 @@
 # RF tomography baselines: intensity, delay, phase, all hybrids, simultaneous and non-simultaneous capture
 
-Target file: `docs/tomography_baselines.md`. Status: design approved 2026-09-25 (all §9.2 defaults adopted); Phase 0 is being implemented on `explore/tomography-p0`. This document merges three independent proposals: a physics and signal-processing design, a hybrid-fusion design, and an evaluation-and-data design. §1.4 records each conflict between them and why it was resolved the way it was. This revision also resolves the critique of the first draft. The main changes are:
+Target file: `docs/tomography_baselines.md`. Status: design approved 2026-09-25 (all §9.2 defaults adopted); Phase 0 (T01–T10) is implemented on `explore/tomography-p0` and pending integration; its pinned conventions and deviations are in the Phase 0 implementation notes at the end of §8 Phase 0. This document merges three independent proposals: a physics and signal-processing design, a hybrid-fusion design, and an evaluation-and-data design. §1.4 records each conflict between them and why it was resolved the way it was. This revision also resolves the critique of the first draft. The main changes are:
 
 - a LoS atom with its phase fixed by the model;
 - a phase-only global gauge;
@@ -267,7 +267,7 @@ Properties:
   - the gauge enters as a diagonal on n.
 - **Fast back-projection (E1, full grids).**
   - Per (c, h), build the Taylor-windowed complex angle-delay volume once by FFT, oversampled 8× in angle and delay.
-  - Per voxel: `(A^H y)(x) ≈ conj(γ(x)) · c(u_c(x), τ(x) − τ_c mod T) · e^{+j2π f_c τ(x)}`.
+  - Per voxel: `(A^H y)(x) ≈ conj(γ(x)) · c(u_c(x), τ(x) + τ_c mod T)`. γ already holds the carrier factor e^{−j2π f_c τ(x)}, so conj(γ) is the carrier compensation. The +τ_c sign follows from the §2.4 gauge (corrected in Phase 0; see the Phase 0 implementation notes).
   - Interpolation is trilinear (8 taps) by default and tricubic optionally, periodic in u (period 2 at d = λ/2) and in t (period N/B).
   - Per-capture sparse gather indices and weights are precomputed on the pruned grid.
   - Accuracy against exact: about −30 dB (trilinear) and −40 dB (tricubic). The trilinear error is below the AWGN of any atom weaker than the reference.
@@ -338,7 +338,7 @@ A full-scene coherent grid at λ/4 would have about 1.5e10 voxels for about 1e5 
 **E1 back-projection.**
 
 - S coherent: the per-capture envelope on coarse grids, and |A^H y| in ROI windows.
-- N coherent: Σ_c |A_c^H(τ̂_c) y_c|². **This is invariant to φ_c only.** Back-projection samples c(u, τ(x) − τ_c), so each capture needs τ̂_c from one of:
+- N coherent: Σ_c |A_c^H(τ̂_c) y_c|². **This is invariant to φ_c only.** Back-projection samples c(u, τ(x) + τ_c), so each capture needs τ̂_c from one of:
   - (a) the LoS anchor (N-LoS);
   - (b) the blind per-capture τ search that maximises cross-view consistency;
   - (c) delay-marginalised angle-only per-capture images (the fallback).
@@ -828,6 +828,120 @@ Each task touches one or two source files, has explicit I/O and numeric acceptan
   - `gauge_errors(est, gt)` (global phase removed; delay absolute).
 - Tests: handmade cases; refinement recovers a 0.3·spacing offset within 0.05·spacing on a Gaussian blob.
 - Deps: T01.
+
+#### Phase 0 implementation notes
+
+Phase 0 is implemented on `explore/tomography-p0`. Each task is one module under `rt` (NumPy/SciPy only; `rt/__init__.py` stays docstring-only with no re-exports) plus `tests/test_rf_tomography_<module>.py`. T05 is tests only. Every number below was measured in the ci container on CPU unless stated otherwise. Phase 1 must treat the conventions in this subsection as binding.
+
+| Task | Module | Main entry points |
+|---|---|---|
+| T01 | `geometry.py`, `views.py` | `VoxelGrid`, `CaptureGeometry` (+ `from_orientations`, `select`), `planar_element_offsets`, `mirror_point`, `single_bounce_point`, `hemisphere_index`, `nested_view_order` |
+| T02 | `antenna.py` | `tr38901_gain` (linear power), `bs_pattern` (complex field), `bs_orientation` |
+| T03 | `forward_exact.py` | `capture_factors`, `atom_cfr`, `dense_matrix` |
+| T04 | `observables.py` | `angle_delay_volume`, `aperture_centre_phase`, `volume_axes`, `extract` (23 nodes), `cfar_returns`, `noise_var_estimate` |
+| T06 | `sync.py` | `gauge_factor`, `apply_gauge`, `draw_gauges`, `capture_power`, `reference_power`, `make_tracks` |
+| T07a | `interp.py` | `periodic_weights`, `gather`, `scatter_add` |
+| T07b | `backproject.py` | `capture_volume`, `capture_lookup`, `apply_lookup`, `backproject`, `envelope_sum` |
+| T07c | `forward_sep.py` | `SeparableOperator`, `incidence_cosine`, `project_shared_phase` |
+| T08 | `kernels.py` | `PowerOperator`, `power_operator`, `power_backproject_grid`, `dirichlet_power`, `noise_floor` |
+| T09 | `synthetic.py` | `l0a_point` … `l0e_image_method`, `l0_mm`, `generate`, `ring_geometry`, `plane_wave_floor`, `mismatch_floor_prediction` |
+| T10 | `metrics.py` | `nms_peaks`, `match`, `froc`, `ap_at`, `recall_at_fa`, `loc_error_decomposed`, `nmse_global_phase`, `nmse_power_scale`, `gauge_errors` |
+
+**Pinned conventions (checked against real Sionna 2.0.1).**
+
+- **Element offsets.** q_m for m = r·C + col is (0, d(col − (C−1)/2), d((R−1)/2 − r)): row 0 is the top (+z), and m is the C-order flattening of `Y[..., r, col, :]`. Sionna's `PlanarArray` passed through `reshape_planar_column_first` matches this to 5.3e-9 m. The element phase is e^{+j k_c u·q_m} at the carrier only, with u the UE-local unit vector toward the source.
+  - The fixture `tests/fixtures/rf_tomography/sionna_los_aperture.npz` is a CPU-traced LoS with rolled UEs, one front and one back. The model matches it with relative spread 3.6e-6 / 5.4e-6, and the other hemisphere is exactly 0.
+  - The wrong variants give spreads of 0.66 to 18.
+- **Frequency grid.** `CaptureGeometry.from_orientations` uses `imaging.frequency_offsets`, the float32 grid Sionna traces on, promoted to float64. For N = 128, `delay_period` is 1.279999974 µs rather than exactly 1280 ns. The DC bin N/2 is exactly 0 Hz. Operators use the exact per-bin `freq_offsets`; the analytic kernels use the uniform δf, which differs from them by about 2e-6 relative.
+- **BS pattern and orientation (T02).**
+  - G_b is the Sionna V-pol TR 38.901 element as a field amplitude √gain with phase 0. Boresight is local +x.
+  - The BS orientation is `rotation_matrix(look_at_orientation(t_b, target))`, i.e. roll 0, exactly as `Transmitter(look_at=…)` sets it.
+  - Measured against Sionna: element 1.4e-6, rotation 5.1e-8, and an end-to-end PathSolver LoS ratio of 1.0e-6.
+- **Polarisation (T03).** `atom_cfr(..., polarization="vv")` adds the co-polar factor pol = (H W_b θ̂(W_bᵀ d_dep)) · (R_v θ̂(u)), where H is the Householder mirror for image sources and the identity for the LoS and BV.
+  - It is required for float32 agreement with Sionna. On the split-pattern GPU mock, the max relative error drops from 8.3e-3 … 2.7e-2 to at most 4.8e-4. The residual is a pure common phase at or below k r ε_f32; after one complex scalar is fitted it is 1e-5.
+  - The design's scalar model stays the default (`"none"`). T09 phantoms use `"none"`.
+- **Hemisphere.** The front hemisphere is u_x ≥ 0 (u_x = 0 counts as front). An atom enters only its own hemisphere, and the other is exactly 0 in every operator.
+- **Angle-delay volume (T04).** The axis order is `[V, B, H, Qy, Qz, Nt]` = (u_y, u_z, t). u = fftshift(fftfreq(Q))/s and t = it/(Nt δf). The scale is always 1/√(RCN), so the unwindowed (1,1) volume is unitary.
+  - **Phase reference.** The volume uses element (0,0), the index origin, not the aperture centre. With centred offsets an even aperture is antiperiodic in u (AF(u+2) = −AF(u)). The index-origin volume is exactly periodic, with period 2 in u and T = 1/δf in t. The centred field of §2.1 is `vol · aperture_centre_phase(u_y, u_z)`.
+  - **Relation to the master pipeline (T05).** The chain `aperture_to_angular_fft → calibrate_angular_cfr → angular_cfr_to_delay` gives the centred c(u,t) of §2.1 divided by N. The two agree as `centred[:, iz] = √(N/(RC)) · cir[iz−1].T` for iz ≥ 1, with `ky == u_y` and `kz[i] == u_z[i+1]`. The u_z = −1 edge row is (−1)^{R−1} times the master kz = +1 row. The worst deviation is 2.4e-15.
+  - **Peaks.** Atoms peak within half a cell of the analytic (u_y, u_z, τ mod T) in both chains; the worst case is 0.4991 cells over 156 cases. Back-hemisphere images are not mirrored.
+- **E1 integer-element shift (T07b).** Interpolating the index-origin volume and applying the centre phase after the gather reaches only −30.7 dB for trilinear with Taylor. The cause is the 3.5-element phase ramp, which rotates 0.34 rad per oversampled sample.
+  - `capture_volume` therefore multiplies the volume by the exactly periodic integer shift e^{−j2πs(−K_c u_y + K_r u_z)}, with K = (L−1)//2. Only the residual half-element phase is applied per point, inside `Lookup.carrier` = √(RCN) · conj(γ) · residual.
+  - Measured against dense^H(W·Y): trilinear −42.4 dB (vs) and −42.2 dB (bv); tricubic −76 dB.
+- **Gauge sign (T06, T07b, T07c, T08).** Every module uses Y_obs = e^{jφ_c} e^{−j2π δf_n τ_c} Y (`sync.gauge_factor`). This is the same as `gauge.align_common_phase_and_delay` on explore/gauge-alignment and as Sionna `Paths.cfr`.
+  - E1 therefore samples c(u, τ(x) **+** τ_c). §3.3 and §4.1 had "−τ_c" and were corrected. T07b compensates τ_c on Y before the FFT, so its lookups do not depend on τ. With the true τ_c the N map equals the S map to 6e-16.
+  - `draw_gauges` returns φ in [0, 2π) and an unwrapped τ. gauge.py wraps φ to (−π, π] and τ to [−T/2, T/2); `metrics.gauge_errors` compares modulo 2π, and modulo T when it is given `period`.
+- **Interpolation (T07a).** All three axes are periodic, and sample k of axis a sits at `origins[a] + k·periods[a]/shape[a]`.
+  - The angle-delay volume uses periods (1/s, 1/s, 1/δf), i.e. (2, 2, N/B), and origins (u_y[0], u_z[0], 0) = (−1, −1, 0).
+  - Taps are in C order over the three axis offsets, with a C-order flat index. Tricubic is Keys with a = −0.5.
+  - `scatter_add` is the exact adjoint of `gather`.
+- **Observables (T04).**
+  - `noise_var` is always the raw per-sample σ². Power nodes carry `meta["noise_dof"]` (I 2N; I_n0 and ID 2; ID-o 2M; I-o 2MN), and the noise-only mean is dof/2 · σ² (`kernels.noise_floor`).
+  - IP_W and P_W remove one phase per (v, b, n), shared by both hemispheres. The omni column removes one phase per (v, b, h, r, col). The per-(c, m) form of §2.3 would keep the inter-hemisphere phase, so P-o would not be empty.
+  - D, D_PHAT and D-o use an order-statistic CFAR (per-profile median / ln 2, threshold −ln(pfa)·noise, pfa 1e-4, at most 3 returns). They need no σ² and are exactly covariant with integer circular shifts.
+  - Parameter defaults: PHAT mask |Y| ≥ 1·σ; partial-D bins (2k+1)N/8; 1el element (3,3). Node names are ASCII, with aliases for `I@n0`, `P×K` and `IP×K`.
+- **Incoherent kernels (T08).** K = 1[h_p = h] · const · |γ|² · K_y K_z K_t, where K_axis = `dirichlet_power` on the fftshifted native grid and K_t is evaluated at it/N − δf(τ_p + τ_c). const is 1 (ID), N (I), 1 (I_n0), M (ID-o) and MN (I-o). The layout equals `extract(Y, node).data`, and the kernel matches `extract(atom_cfr)` to 3e-15.
+- **Reference captures and RNG streams (T06, T09).**
+  - Two different references are in use. The gauge reference c0 = (order[0], 0) is passed as `ref`. The power reference `c_ref` is the lower-median-power LoS-visible capture (C8); callers pass `los_visible & training_mask`.
+  - P_ref sums the hemisphere powers (mean over r, col, n of Σ_h |Y|²), not |front + back|².
+  - Capture streams are `SeedSequence([ds, v, b, realization])`. The noise is drawn first; for b = 0 only, the view's element gains and calibration noise follow. Gauge streams are `SeedSequence([ds, realization, 2**32−1, k])`. A tag word is needed because SeedSequence zero-pads short entropy.
+  - T09 uses `SeedSequence([seed, 0|1|2])` for placement, amplitudes and jitter, so an L0-mm phantom has exactly the points of the plane-wave phantom with the same seed.
+- **Singular points.** A point within `LOS_VS_TOLERANCE_M` = 1e-9 m of a UE, or of a BS in BV space, makes `capture_factors`, `SeparableOperator` and `PowerOperator` raise. `backproject` and `power_backproject_grid` return 0 for such points instead (`forward_exact._singular_mask`). In VS space a point at a BS is the LoS source and is valid.
+
+**Deviations from the §8 entries.** No acceptance threshold was relaxed.
+
+- **Extended signatures.**
+  - `CaptureGeometry` has `aperture_shape` (for the 4×4 micro scene) and an optional `bs_rot` (`from_orientations(..., bs_look_at=…)`).
+  - `periodic_weights` takes `origins`, and `noise_var_estimate` takes `delta_f`.
+  - `power_backproject_grid` takes a required `space` and the keywords `product`, `kind`, `oversample`, `pattern` and `polarization`.
+  - `make_tracks` takes `freq_offsets`, `sigma_t`, `ref`, `hardware`, `Y_los` and `c_ref`. The scatter-referenced SNR needs `Y_los` and is NaN without it.
+  - `draw_gauges` also accepts `sigma_t="uniform"`, which needs `period`.
+  - `atom_cfr` takes `polarization`, and `nms_peaks` names its first argument `density`.
+- **T01 test tolerance.** The N = 128 `delay_period` test uses 1e-13 s because of the float32 grid.
+- **T03 plane-vs-spherical bound.** k·max|q|²/(2r) is not strict for every direction: it can be exceeded by up to k|q|⁴/(8r³), which is 1.8e-8 rad at 10 m. The test uses directions where the bound holds; at boresight it is tight (0.16480 vs 0.16482 rad).
+- **T07b: what BP approximates.** BP approximates A^H(W·Y), with W the peak-normalised separable Taylor window and no division by the window gain. The −30 dB gate is therefore measured against dense^H(W·Y). A non-planar aperture (element jitter) raises; L0-mm jitter must use `forward_exact` or `forward_sep`.
+- **T07c.**
+  - Only `wavefront="plane"` without squint is supported.
+  - "constrained" (a″) is linear in complex quadratic coefficients x[P, 3] of cos θ_inc = |d·n|, where cos θ_inc = 1 for the LoS. It is defined in VS space only. The shared-phase constraint is left to the solver via the exact projection `project_shared_phase`.
+  - A_c and D_c are cached up to 4 GiB. They cannot come from a recurrence, because the float32 grid is non-uniform by about 2 Hz, which would give about 2.5e-5 rad of error.
+- **T08.** The MC test draws random per-trial atom phases, the incoherent model's own assumption. Fixed-phase cross terms (2–15 % on a 4×4 aperture) are the §3.3 limitation and are not gated. The BP gates were set from measurements, because the doc gives none: trilinear 6e-2 max / 3e-2 l2, tricubic 3e-3 / 2e-3.
+- **T09 choices.**
+  - Default capture: an 8-view ring at r = 30 m around (0, 0, 5), UE height 1.5 m, BS (−70, 5, 25) with tr38901, N = 128.
+  - Default grid: a 20 m cube at 0.5 m. L0c points stay in the 10 m box.
+  - Element jitter: 3-D isotropic, default std λ/200, shared by all captures.
+  - L0d: a Born plate with ρ_s = j√(4π)Γ/λ, which is 1.005 of the image source at normal incidence.
+  - L0e: LoS plus first-order images on infinite planes, with scalar ITU-R P.2040 TM (ground) and TE (walls) coefficients.
+  - L0b on the 2 m CI grid with offset_max 0.2 m is feasible only for separations near a multiple of the spacing (2 m works; 1 m raises).
+- **T10.** `loc_error_decomposed` needs a caller-supplied reference point for the range direction. `min_value` is effectively required in `nms_peaks`, because zero plateaus are local maxima.
+
+**Acceptance evidence (task tests).**
+
+| Criterion | Measured | Gate |
+|---|---|---|
+| T03 `atom_cfr` (tr38901, vv) vs Sionna GPU mock, 7 LoS views | 6.2e-5 … 4.8e-4 max rel. The through-building view ue_000001 fits one complex β = 0.082 with residual 2.9e-5 | 1e-3 |
+| T04 noise estimate, 69 dB LoS peak, 30 dB | ≤ 5.3 % over 25 seeds; diffuse clutter ≤ 7.0 % | 10 % |
+| T07a Dirichlet, 8× oversampled | trilinear 1.8e-2, tricubic 4.7e-4 | 3e-2 / 1e-3 |
+| T07b fast BP vs dense^H(W·Y), 10 off-grid atoms beyond 5 m | trilinear −42.4 dB, tricubic −76 dB; real Sionna data −42.4 dB | −30 / −40 dB (pins −36 / −60) |
+| T07c adjoint; equality with `atom_cfr` | 3e-19 … 1e-17; 5e-16 | 1e-10; 1e-12 |
+| T08 adjoint; MC E\|c\|² (T = 20 000) | exact to round-off; max 2.6 % (SE ≤ 0.73 %) | 1e-12; 5 % |
+| T09 L0-mm floor vs prediction | ≤ 0.14 dB; combined floor −27.4 … −30.0 dB at 20–40 m | 3 dB |
+| T10 sub-voxel refinement, 0.3·spacing offset | 0.021 voxel (σ = 1.5 voxels); tilted blob 0.031 | 0.05 |
+
+**Independent review spot checks.** These scripts were written by the reviewer and do not reuse the task tests.
+
+- **Forward model vs Sionna.** A from-scratch model of `sionna_mock_los.npz` shares no code with `forward_exact`: it re-derives the element positions, the TR 38.901 gain, the look-at rotation and the V-pol vectors. It gives max relative errors of 4.52e-4 (front) and 4.75e-4 (back), |β| = 1.000000, and a residual of 2.9e-6 / 3.6e-6 after the fit. `atom_cfr` gives the same numbers, and the grid equals the fixture grid exactly.
+- **End-to-end peaks.** 60 random VS/BV atoms were placed with random UE yaw/pitch/roll, N = 32. The worst peak offset is 0.497 cells through the master chain (64×64 FFT) and 0.498 oversampled cells in the T04 (8,8) volume. No atom entered the wrong hemisphere.
+- **Adjoints.**
+  - T07c: 8e-19 … 1e-17 for all β models, cached and uncached, with tr38901 + vv and random gauges. The gauged forward equals `apply_gauge(atom_cfr)` to 8e-16.
+  - T08: ≤ 6e-17 for all five products with random τ_c. One column equals `extract(apply_gauge(atom_cfr))` to 4e-15.
+- **E1 vs exact.** 12 atoms and 312 evaluation points beyond 5 m, V = 3, B = 2. With Taylor, trilinear is −42.6 / −43.7 dB (vs/bv), and on pure-noise Y it is −42.9 dB. Tricubic ranges from −61 to −82 dB over all cases. Without a window on noise, the trilinear max/peak is −34.7 dB: it still meets the −30 dB gate but not the −36 dB atom pin.
+- **Noise estimate.** L0e scene, 6 views, 30 dB SNR, 20 seeds: +2.8 % mean bias and ≤ 5.4 % error. The bias comes from the −32 dB angular sidelobes of the 62 dB LoS peak. On pure noise the estimate has +0.1 % mean and ≤ 3.5 % error.
+
+**Known limitations to carry into Phase 1.**
+
+- The noise estimate degrades with dense strong specular multipath: 10 paths per view at 63–69 dB give about +8 %, and 20 paths give about 16 %.
+- The E1 per-point cost is about 0.75 µs per (point, capture), mostly `capture_factors` and `periodic_weights`. The §4.1 extrapolation is 42.9 s for G_phys with 16 captures against a 60 s target. Uncached T07c and T08 take about 4–12 s per operator application at P = 5e4, against 0.3–0.7 s cached, which is the default below 4 GiB.
+- The T09 phantoms use the scalar polarisation model. Every operator defaults to `polarization="none"` and accepts `"vv"` (`forward_exact`, `forward_sep`, `backproject`, `kernels`).
 
 ### Phase 1: the baselines (E1/E2) and the runner
 
