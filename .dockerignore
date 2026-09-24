@@ -1,0 +1,14 @@
+# Docker のビルドに不要なもの。
+# サブモジュールの .git (gitfile) はチェックアウトごとに内容が変わりキャッシュを壊すため除外する。
+.git
+**/.git
+.venv
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+data/generated
+data/intermediate
+ci-reports
+third_party/sionna-rt/doc
+third_party/sionna-rt/tutorials
+third_party/sionna-rt/test

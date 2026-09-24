@@ -3,7 +3,7 @@ name = "plateau-sionna-dataset"
 version = "0.1.0"
 description = "CityGML to Sionna-RT Ray Tracing Dataset Generator"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
     "cjio>=0.9.0",         # CityJSONパーサー
     "trimesh>=4.0.0",      # 3Dメッシュ処理
@@ -17,19 +17,25 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = [
+# test: 本番イメージにも含め、CI は本番イメージそのものでテストする
+test = [
     "pytest>=8.0.0",
     "ruff>=0.3.0",
+]
+# dev: Devcontainer 用 (test + ノートブック・型チェック)
+dev = [
+    { include-group = "test" },
     "jupyter>=1.0.0",
     "ty>=0.0.75",
 ]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"] # PEP8, Pyflakes, isort
 
 [tool.uv.sources]
-sionna-rt = { path = "/wheels/sionna_rt-2.0.1-py3-none-any.whl" }
+# サブモジュールのソースから直接ビルドする (純 Python のため CUDA アーキテクチャ非依存)
+sionna-rt = { path = "third_party/sionna-rt" }

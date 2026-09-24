@@ -1,85 +1,69 @@
+# イメージは docker/Dockerfile のマルチステージから3つだけ作る:
+#   base : ${IMAGE_PREFIX}-base  CUDA base + OS ライブラリ + uv + Python
+#   prod : ${IMAGE_PREFIX}       本番 (uv.lock 通りの依存 + test ツール + src)。CI もこれを使う
+#   dev  : ${IMAGE_PREFIX}-dev   Devcontainer 用 (prod + 開発ツール)
+#
 # IMAGE_PREFIX: イメージ名の接頭辞 (既定: plateau-sionna)。
-#   CIでは別の接頭辞を使い、開発者/Devcontainerが参照するイメージタグを上書きしない。
+#   CI は別の接頭辞を使い、開発者のイメージタグを上書きしない。
+# CUDA_BASE_IMAGE: ベースにする nvidia/cuda イメージを差し替える場合に指定する。
+
+x-build: &build
+  context: .
+  dockerfile: docker/Dockerfile
+  args:
+    CUDA_BASE_IMAGE: ${CUDA_BASE_IMAGE:-nvidia/cuda:12.8.1-base-ubuntu24.04}
+
 services:
-  # 1. 共通ベースイメージ (依存関係なし、独立ビルド可能)
   base:
-    image: ${IMAGE_PREFIX:-plateau-sionna}-base:${CUDA_ARCH}
+    image: ${IMAGE_PREFIX:-plateau-sionna}-base:latest
     build:
-      context: .
-      dockerfile: docker/Dockerfile.base
-      args:
-        CUDA_IMAGE: ${CUDA_IMAGE:-nvidia/cuda:12.1.1-devel-ubuntu22.04}
+      <<: *build
+      target: base
 
-  # 2. C++ バイナリビルダー (Sionna-RTのコンパイル)
-  builder:
-    image: ${IMAGE_PREFIX:-plateau-sionna}-builder:${CUDA_ARCH}
-    depends_on:
-      - base
+  prod:
+    image: ${IMAGE_PREFIX:-plateau-sionna}:latest
     build:
-      context: .
-      dockerfile: docker/Dockerfile.builder
-      args:
-        BASE_IMAGE: ${IMAGE_PREFIX:-plateau-sionna}-base:${CUDA_ARCH}
-        CUDA_ARCH: ${CUDA_ARCH}
+      <<: *build
+      target: prod
 
-  # 3. 実行用イメージ (本番用)
-  runtime:
-    image: ${IMAGE_PREFIX:-plateau-sionna}-runtime:${CUDA_ARCH}
-    depends_on:
-      - builder
+  dev:
+    image: ${IMAGE_PREFIX:-plateau-sionna}-dev:latest
     build:
-      context: .
-      dockerfile: docker/Dockerfile.runtime
-      args:
-        BASE_IMAGE: ${IMAGE_PREFIX:-plateau-sionna}-base:${CUDA_ARCH}
-      # builderイメージから直接アーティファクトを吸い上げる (Compose V2機能)
-      additional_contexts:
-        - builder=docker-image://${IMAGE_PREFIX:-plateau-sionna}-builder:${CUDA_ARCH}
+      <<: *build
+      target: dev
 
-  # 4. インフラ検証用テストランナー (runtimeイメージを直接利用)
+  # インフラ統合テスト: prod イメージ上で Sionna-RT のユニットテスト (CPU/LLVM サブセット) を実行
   test:
-    image: ${IMAGE_PREFIX:-plateau-sionna}-runtime:${CUDA_ARCH}
-    depends_on:
-      - builder
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.runtime
-      args:
-        BASE_IMAGE: ${IMAGE_PREFIX:-plateau-sionna}-base:${CUDA_ARCH}
-      additional_contexts:
-        - builder=docker-image://${IMAGE_PREFIX:-plateau-sionna}-builder:${CUDA_ARCH}
+    image: ${IMAGE_PREFIX:-plateau-sionna}:latest
+    pull_policy: never
     profiles:
       - test
     volumes:
       - ./third_party/sionna-rt/test:/test-data:ro
+    working_dir: /test-data
     command: >
-      bash -c "uv pip install --system 'pytest>=8.0.0' && 
-      cd /test-data && 
-      python -m pytest -o cache_dir=/tmp/.pytest_cache --cpu -v unit/test_utils.py unit/test_hashing.py"
+      python -m pytest -o cache_dir=/tmp/.pytest_cache --cpu -v
+      unit/test_utils.py unit/test_hashing.py
 
-  # 5. CIランナー (runtime + pytest)。チェックアウト中のワークスペースをマウントして検証する
+  # CI ランナー: prod イメージにチェックアウト中のワークスペースをマウントして検証する
   ci:
-    image: ${IMAGE_PREFIX:-plateau-sionna}-ci:${CUDA_ARCH}
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.ci
-      args:
-        RUNTIME_IMAGE: ${IMAGE_PREFIX:-plateau-sionna}-runtime:${CUDA_ARCH}
+    image: ${IMAGE_PREFIX:-plateau-sionna}:latest
+    pull_policy: never
     profiles:
       - ci
-    # ホスト側のランナーユーザーで実行し、ワークスペースにroot所有のファイルを残さない
+    # ホスト側のランナーユーザーで実行し、ワークスペースに他ユーザー所有のファイルを残さない
+    # (UID 1000 ならイメージの app ユーザーと一致し HOME=/home/app になる)
     user: "${CI_UID:-1000}:${CI_GID:-1000}"
     working_dir: /workspace
     volumes:
       - ./:/workspace
     environment:
-      HOME: /tmp
       PYTHONPATH: /workspace/src
       PYTHONDONTWRITEBYTECODE: "1"
       MPLBACKEND: Agg
     command: python -m pytest -p no:cacheprovider -v tests
 
-  # 6. GPU付きCIランナー (節目に回す重いE2E検証用)
+  # GPU 付き CI ランナー (節目に回す重い E2E 検証用)
   ci-gpu:
     extends:
       service: ci

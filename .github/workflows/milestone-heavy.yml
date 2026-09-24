@@ -22,7 +22,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CUDA_ARCH: "75"
   IMAGE_PREFIX: plateau-sionna-ci
 
 jobs:
@@ -34,8 +33,8 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Build CI images (cached)
-        run: scripts/ci/build-images.sh
+      - name: Build images (base, prod, dev; cached)
+        run: scripts/ci/build-images.sh base prod dev
 
       - name: Unit tests
         run: scripts/ci/run-unit-tests.sh

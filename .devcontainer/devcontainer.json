@@ -1,11 +1,9 @@
 {
   "name": "PLATEAU Sionna-RT Dev",
   "build": {
-    "dockerfile": "Dockerfile",
-    "args": {
-      "BASE_IMAGE": "plateau-sionna-base:${localEnv:CUDA_ARCH:75}",
-      "BUILDER_IMAGE": "plateau-sionna-builder:${localEnv:CUDA_ARCH:75}"
-    }
+    "dockerfile": "../docker/Dockerfile",
+    "context": "..",
+    "target": "dev"
   },
   "workspaceFolder": "/workspace",
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
@@ -13,6 +11,9 @@
     "--gpus",
     "all"
   ],
+  "containerEnv": {
+    "PYTHONPATH": "/workspace/src"
+  },
   "customizations": {
     "vscode": {
       "extensions": [
@@ -22,7 +23,7 @@
         "tamasfe.even-better-toml"
       ],
       "settings": {
-        "python.defaultInterpreterPath": "/usr/bin/python3",
+        "python.defaultInterpreterPath": "/opt/venv/bin/python",
         "python.formatting.provider": "none",
         "editor.formatOnSave": true,
         "[python]": {
@@ -31,6 +32,6 @@
       }
     }
   },
-  "remoteUser": "vscode",
-  "postCreateCommand": "sudo chown vscode:vscode /workspace/uv.lock || true && uv sync --dev && uv pip install /wheels/*.whl"
+  "remoteUser": "app",
+  "postCreateCommand": "uv sync --locked"
 }

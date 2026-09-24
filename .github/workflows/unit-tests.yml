@@ -20,7 +20,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CUDA_ARCH: "75"
   IMAGE_PREFIX: plateau-sionna-ci
 
 jobs:
