@@ -274,6 +274,14 @@ with a horizontal `--building-clearance-m` dilation. Cells that are invalid
 (aggregated gain `<= 0` or non-finite), too close to a BS, below the threshold
 or excluded are never chosen.
 
+Invalid cells include Monte Carlo sampling holes, not only true shadow. On the
+mock city (1 BS, 120 m x 120 m, 1 m cells, 1e6 samples per transmitter), 22% of
+the cells get no ray; the share of outdoor cells left invalid grows with the
+distance to the BS (0% within 40 m, 15% at 70-100 m, 55% beyond 100 m), so
+the candidates, and hence the drawn UEs, lean towards the BS and towards
+line of sight. For large maps with small cells, raise `--rm-samples-per-tx`
+(1e7 cut the invalid cells from 3119 to 667) or coarsen `--rm-cell-size`.
+
 ### Reproducibility
 
 Sionna GPU tracing is **not** bit-reproducible run to run (measured ~`6e-7`
@@ -298,7 +306,10 @@ placement = replan_from_manifest("OUT")   # saved map + seed -> identical poses
 ```
 
 Reusing a map requires the same carrier, base stations and UE height (checked
-before tracing); `--rm-*` options are ignored then. Changing only
+before tracing); `--rm-*` options are ignored then. The scene itself is not
+hashed: a map computed on a different scene file only prints a warning, so keep
+the map with the scene it was computed on. `--radio-map` is rejected with
+`--placement ring`. Changing only
 `--placement-seed` changes only the placement (and the traced views): every
 other manifest section stays equal.
 

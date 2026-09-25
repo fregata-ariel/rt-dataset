@@ -261,3 +261,42 @@ def test_coverage_grid_is_centered_on_target_by_default(scene_xml: Path, tmp_pat
     assert result.exit_code == 0, result.output
     grid = RadioMapGrid.from_dict(FakeDataset.instances[-1].placement["radio_map"]["grid"])
     assert grid.center_m == (5.0, 5.0, 1.5)
+
+
+def test_radio_map_with_ring_placement_is_rejected(scene_xml: Path, tmp_path: Path) -> None:
+    runner = CliRunner()
+    first = runner.invoke(cli, _coverage_args(scene_xml, tmp_path / "first"))
+    assert first.exit_code == 0, first.output
+    count = len(FakeDataset.instances)
+    result = runner.invoke(
+        cli,
+        [
+            "rf-camera-multiview",
+            str(scene_xml),
+            str(tmp_path / "ring"),
+            "--radio-map",
+            str(tmp_path / "first" / "placement" / "radio_map.json"),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "--placement coverage" in result.output
+    assert len(FakeDataset.instances) == count
+
+
+def test_radio_map_reuse_warns_on_other_scene(scene_xml: Path, tmp_path: Path) -> None:
+    runner = CliRunner()
+    first = runner.invoke(cli, _coverage_args(scene_xml, tmp_path / "first"))
+    assert first.exit_code == 0, first.output
+    saved_map = str(tmp_path / "first" / "placement" / "radio_map.json")
+    same = runner.invoke(
+        cli, _coverage_args(scene_xml, tmp_path / "same", "--radio-map", saved_map)
+    )
+    assert same.exit_code == 0, same.output
+    assert "warning" not in same.output
+    other_xml = tmp_path / "other_scene.xml"
+    other_xml.write_text(DUMMY_XML, encoding="utf-8")
+    other = runner.invoke(
+        cli, _coverage_args(other_xml, tmp_path / "other", "--radio-map", saved_map)
+    )
+    assert other.exit_code == 0, other.output
+    assert "warning: the saved radio map was computed on" in other.output

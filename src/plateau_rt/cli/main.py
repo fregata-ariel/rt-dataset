@@ -221,6 +221,14 @@ def _plan_coverage_views(
             base_stations=base_stations,
             ue_height_m=ue_height_m,
         )
+        recorded_scene = str(saved.metadata.get("source_scene", ""))
+        if Path(recorded_scene).resolve() != Path(xml_file).resolve():
+            click.echo(
+                f"warning: the saved radio map was computed on {recorded_scene!r}, "
+                f"not on {str(xml_file)!r}; only carrier, base stations and UE height "
+                "are checked",
+                err=True,
+            )
         metadata_path = copy_radio_map(saved, output_dir)
         radio_map_source = "loaded"
         radio_map_origin: str | None = str(radio_map)
@@ -538,6 +546,8 @@ def rf_camera_multiview(
     )
 
     if placement == "ring":
+        if radio_map is not None:
+            raise click.UsageError("--radio-map requires --placement coverage")
         views = generate_ring_views(
             target=target,
             radius_m=radius_m,
