@@ -109,6 +109,7 @@ PYTHONPATH=./src python -m plateau_rt.cli.main --help
 - [docs/rf_camera_multiview.md](docs/rf_camera_multiview.md): マルチビューデータセットとカメラモデル
 - [docs/optical_reference.md](docs/optical_reference.md): 光学参照レンダー (issue #11)、3DGS 学習との接続
 - [docs/rf_camera_partial.md](docs/rf_camera_partial.md): 部分/要約観測データセット (issue #14 の基礎モデル学習用)
+- [docs/viewer.md](docs/viewer.md): Web viewer (epic #26): 起動 (`make viewer-up`)、API、store、deriver、frontend、安全、試験
 - [docs/viewer_bundle.md](docs/viewer_bundle.md): viewer にアップロードする bundle の形式と種別判定 (issue #31)
 
 ## コード構成

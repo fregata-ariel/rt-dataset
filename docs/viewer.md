@@ -1,8 +1,10 @@
 # Web Viewer
 
 The shared web viewer for RF-camera bundles (epic #26). This file covers the content-addressed
-store, the deriver registry and cache, bundle kind detection and validation, and the HTTP backend
-(FastAPI). The bundle format itself is defined in `docs/viewer_bundle.md`.
+store, the deriver registry and cache, bundle kind detection and validation, the HTTP backend
+(FastAPI), background jobs, the Docker service, security, the command line, the frontend and the
+browser smoke tests. The bundle format itself is defined in `docs/viewer_bundle.md`; CI wiring is
+in `docs/ci.md`. To try it: `make viewer-up`, then open http://127.0.0.1:8765/ (see "Docker").
 
 ## Store format
 
@@ -459,7 +461,8 @@ are out of scope here (V1-12, #59).
 
 ### Response headers
 
-Every HTTP response carries:
+Every HTTP response carries the following, including the 400 for a bad `Host`, the 403 for a CSRF
+violation and the plain-text 500 for an unhandled exception:
 
 - `Content-Security-Policy` with the baseline
   `default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'`.

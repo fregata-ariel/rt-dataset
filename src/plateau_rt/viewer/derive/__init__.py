@@ -28,11 +28,11 @@ from typing import Any, Protocol
 import numpy as np
 
 from plateau_rt.viewer import safeio
+from plateau_rt.viewer.kinds import MEMBER_KINDS  # re-exported: one definition of the kinds
 from plateau_rt.viewer.safeio import NpyInfo, UnsafePathError
 from plateau_rt.viewer.settings import ViewerSettings
 from plateau_rt.viewer.store import Store, _make_writable_and_remove
 
-MEMBER_KINDS = ("rf_dataset", "rf_partial", "tomo_run", "scene")
 PARAM_KINDS = ("enum", "int", "float", "view", "bs", "member_link")
 RANGE_KINDS = ("int", "float")
 SPACE_KINDS = ("enum", "view", "bs", "member_link")

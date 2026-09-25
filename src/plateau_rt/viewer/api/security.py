@@ -8,6 +8,7 @@ from collections.abc import Collection, Mapping
 from fastapi import FastAPI
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import PlainTextResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from plateau_rt.viewer.api import errors
@@ -86,8 +87,12 @@ class SecurityHeadersMiddleware:
             await self.app(scope, receive, send)
             return
 
+        started = False
+
         async def send_with_headers(message: Message) -> None:
+            nonlocal started
             if message["type"] == "http.response.start":
+                started = True
                 headers = MutableHeaders(scope=message)
                 headers["content-security-policy"] = merge_csp(
                     headers.get("content-security-policy")
@@ -96,7 +101,17 @@ class SecurityHeadersMiddleware:
                 headers["referrer-policy"] = "no-referrer"
             await send(message)
 
-        await self.app(scope, receive, send_with_headers)
+        try:
+            await self.app(scope, receive, send_with_headers)
+        except Exception:
+            # Starlette's ServerErrorMiddleware is always outermost, so its 500 would
+            # bypass this middleware. Answer the 500 here (with the headers) and re-raise
+            # so the server still logs the traceback; the outer middleware then sees a
+            # started response and sends nothing more.
+            if not started:
+                response = PlainTextResponse("Internal Server Error", status_code=500)
+                await response(scope, receive, send_with_headers)
+            raise
 
 
 class CSRFMiddleware:

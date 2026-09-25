@@ -340,6 +340,24 @@ def test_security_headers_on_every_response(tmp_path: Path, zip_bytes: bytes) ->
     app.state.jobs.shutdown()
 
 
+def test_security_headers_on_unhandled_500(tmp_path: Path) -> None:
+    """AC2: an unhandled exception still answers 500 with the baseline headers."""
+    app = make_app(tmp_path)
+
+    @app.get("/api/boom")
+    def boom() -> None:
+        raise RuntimeError("boom")
+
+    client = viewer_client(app, raise_server_exceptions=False)
+    response = client.get("/api/boom")
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+    _assert_security_headers(response)
+    with pytest.raises(RuntimeError, match="boom"):
+        viewer_client(app).get("/api/boom")
+    app.state.jobs.shutdown()
+
+
 def test_merge_csp_keeps_the_baseline() -> None:
     """merge_csp keeps the baseline and appends a non-empty route policy."""
     assert merge_csp(None) == CONTENT_SECURITY_POLICY
