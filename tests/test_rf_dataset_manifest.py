@@ -459,3 +459,20 @@ def test_missing_optionals_default_to_none(tmp_path: Path):
     entry = manifest.view("ue_000000").bs_entry("bs_000")
     assert entry.bs_direction_local is None
     assert entry.bs_in_front_hemisphere is None
+
+
+def test_placement_section_property(tmp_path: Path):
+    manifest_dict = write_v3_dataset(tmp_path)
+    assert parse_rf_dataset_manifest(manifest_dict, root=tmp_path).placement is None
+    section = {"method": "coverage", "views": []}
+    manifest_dict["placement"] = section
+    manifest = parse_rf_dataset_manifest(manifest_dict, root=tmp_path)
+    assert manifest.placement == section
+    assert manifest.placement is manifest.raw["placement"]
+
+
+def test_placement_section_must_be_mapping(tmp_path: Path):
+    manifest_dict = write_v3_dataset(tmp_path)
+    manifest_dict["placement"] = ["not", "a", "mapping"]
+    with pytest.raises(ManifestError, match="placement"):
+        parse_rf_dataset_manifest(manifest_dict, root=tmp_path)

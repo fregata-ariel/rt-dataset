@@ -1,8 +1,17 @@
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Any
 
 import click
 
 from plateau_rt.application.build_scene import SceneBuilder
+from plateau_rt.domain.rf_camera.camera import RFViewSpec
+from plateau_rt.domain.rf_camera.placement import (
+    AGGREGATIONS,
+    ORIENTATION_POLICIES,
+    THRESHOLD_MODES,
+)
 
 
 @click.group()
@@ -145,6 +154,153 @@ def rf_camera_delay(output_dir: Path, power_floor_db: float):
     develop_angle_delay(output_dir, power_floor_db=power_floor_db)
 
 
+def _plan_coverage_views(
+    *,
+    xml_file: Path,
+    output_dir: Path,
+    config: Any,
+    num_views: int,
+    placement_seed: int,
+    threshold_mode: str,
+    threshold_value: float,
+    aggregation: str,
+    orientation_policy: str,
+    face_bs: int | str,
+    pitch_deg: float,
+    building_clearance_m: float,
+    min_bs_distance_m: float,
+    min_ue_spacing_m: float,
+    jitter_fraction: float,
+    rm_center: tuple[float, float] | None,
+    rm_size: tuple[float, float],
+    rm_cell_size: tuple[float, float],
+    rm_max_depth: int,
+    rm_samples_per_tx: int,
+    rm_seed: int,
+    radio_map: Path | None,
+    ue_height_m: float,
+    target: tuple[float, float, float],
+) -> tuple[list[RFViewSpec], dict[str, Any]]:
+    """Plan coverage-map UE views and build the manifest ``placement`` section.
+
+    The Sionna adapter is imported lazily. When ``--radio-map`` is given the
+    saved map is reused (the ``--rm-*`` options are ignored); otherwise a radio
+    map is computed and saved under ``output_dir/placement/``. Both branches
+    then reload the saved float32 arrays, so the NumPy placement is identical.
+    """
+    from plateau_rt.adapters.sionna.radio_map import (
+        RadioMapSolverSettings,
+        compute_radio_map,
+    )
+    from plateau_rt.application.ue_placement import (
+        building_exclusion_mask,
+        check_radio_map_matches,
+        copy_radio_map,
+        load_radio_map,
+        placement_manifest_section,
+        save_radio_map,
+    )
+    from plateau_rt.domain.rf_camera.placement import (
+        CoveragePlacementSettings,
+        CoverageThreshold,
+        RadioMapGrid,
+        plan_coverage_placement,
+    )
+
+    base_stations = config.resolve_base_stations()
+    solver = RadioMapSolverSettings(
+        max_depth=rm_max_depth,
+        samples_per_tx=rm_samples_per_tx,
+        seed=rm_seed,
+    )
+    if radio_map is not None:
+        saved = load_radio_map(radio_map)
+        check_radio_map_matches(
+            saved,
+            carrier_frequency_hz=config.carrier_frequency_hz,
+            base_stations=base_stations,
+            ue_height_m=ue_height_m,
+        )
+        metadata_path = copy_radio_map(saved, output_dir)
+        radio_map_source = "loaded"
+        radio_map_origin: str | None = str(radio_map)
+        click.echo("using the saved radio-map grid/solver settings (--rm-* are ignored)")
+    else:
+        center = (
+            (float(target[0]), float(target[1]))
+            if rm_center is None
+            else (float(rm_center[0]), float(rm_center[1]))
+        )
+        grid = RadioMapGrid(
+            center_m=(center[0], center[1], float(ue_height_m)),
+            size_m=(float(rm_size[0]), float(rm_size[1])),
+            cell_size_m=(float(rm_cell_size[0]), float(rm_cell_size[1])),
+        )
+        result = compute_radio_map(xml_file, dataset_config=config, grid=grid, solver=solver)
+        metadata_path = save_radio_map(
+            output_dir,
+            path_gain=result.path_gain,
+            indoor_mask=result.indoor_mask,
+            grid=result.grid,
+            solver=solver.to_dict(),
+            base_stations=[
+                {"bs_id": bs_id, "position_m": list(position), "look_at_m": list(look_at)}
+                for bs_id, position, look_at in base_stations
+            ],
+            carrier_frequency_hz=config.carrier_frequency_hz,
+            source_scene=str(xml_file),
+        )
+        radio_map_source = "computed"
+        radio_map_origin = None
+
+    saved = load_radio_map(metadata_path)
+    settings = CoveragePlacementSettings(
+        num_views=num_views,
+        placement_seed=placement_seed,
+        threshold=CoverageThreshold(mode=threshold_mode, value=threshold_value),
+        aggregation=aggregation,
+        min_bs_distance_m=min_bs_distance_m,
+        min_spacing_m=min_ue_spacing_m,
+        jitter_fraction=jitter_fraction,
+        orientation_policy=orientation_policy,
+        face_bs=face_bs,
+        target=tuple(target),
+        pitch_deg=pitch_deg,
+    )
+    exclusion = building_exclusion_mask(
+        saved.indoor_mask, saved.grid, clearance_m=building_clearance_m
+    )
+    placement = plan_coverage_placement(
+        saved.path_gain,
+        saved.grid,
+        settings,
+        exclusion_mask=exclusion,
+        bs_positions=[position for _, position, _ in base_stations],
+    )
+    section = placement_manifest_section(
+        placement,
+        saved=saved,
+        dataset_dir=output_dir,
+        radio_map_source=radio_map_source,
+        radio_map_origin=radio_map_origin,
+        building_clearance_m=building_clearance_m,
+    )
+    click.echo(
+        f"coverage candidates={placement.candidates.count} "
+        f"threshold_db={list(placement.candidates.threshold_db)}"
+    )
+    for row, view in enumerate(placement.views):
+        chosen = int(placement.sampled.candidate_index[row])
+        iy, ix = (int(v) for v in placement.candidates.indices[chosen])
+        click.echo(
+            f"  [{row + 1:02d}/{len(placement.views):02d}] {view.view_id}: "
+            f"cell=({iy},{ix}) position={view.position} "
+            f"gain_db={float(placement.candidates.gain_db[chosen]):.2f} "
+            f"facing_bs={placement.facing_bs_index[row]}"
+        )
+    return placement.views, section
+
+
 @cli.command("rf-camera-multiview")
 @click.argument("xml_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.argument("output_dir", type=click.Path(file_okay=False, path_type=Path))
@@ -168,6 +324,140 @@ def rf_camera_delay(output_dir: Path, power_floor_db: float):
 @click.option("--frequency-bins", type=int, default=64, show_default=True)
 @click.option("--max-depth", type=int, default=5, show_default=True)
 @click.option("--synthetic-array/--explicit-array", default=True, show_default=True)
+@click.option(
+    "--placement",
+    type=click.Choice(["ring", "coverage"]),
+    default="ring",
+    show_default=True,
+    help="UE placement method (ring or coverage-map based)",
+)
+@click.option(
+    "--placement-seed",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Dedicated coverage placement seed (coverage only)",
+)
+@click.option(
+    "--pl-threshold-mode",
+    type=click.Choice(THRESHOLD_MODES),
+    default="relative_to_max_db",
+    show_default=True,
+    help="Path-gain threshold reference mode (coverage only)",
+)
+@click.option(
+    "--pl-threshold",
+    type=float,
+    default=30.0,
+    show_default=True,
+    help="Threshold in dB (absolute / below max) or percentile (coverage only)",
+)
+@click.option(
+    "--bs-aggregation",
+    type=click.Choice(AGGREGATIONS),
+    default="max",
+    show_default=True,
+    help="Multi-BS path-gain aggregation (coverage only)",
+)
+@click.option(
+    "--orientation-policy",
+    type=click.Choice(ORIENTATION_POLICIES),
+    default="face_bs",
+    show_default=True,
+    help="UE orientation policy (coverage only)",
+)
+@click.option(
+    "--face-bs",
+    type=str,
+    default="strongest",
+    show_default=True,
+    help="BS index or 'strongest' for --orientation-policy face_bs (coverage only)",
+)
+@click.option(
+    "--pitch-deg",
+    type=float,
+    default=0.0,
+    show_default=True,
+    help="Forward elevation for --orientation-policy random_yaw (coverage only)",
+)
+@click.option(
+    "--building-clearance-m",
+    type=click.FloatRange(min=0.0),
+    default=1.0,
+    show_default=True,
+    help="Dilation of the indoor mask [m] (coverage only)",
+)
+@click.option(
+    "--min-bs-distance-m",
+    type=click.FloatRange(min=0.0),
+    default=5.0,
+    show_default=True,
+    help="Minimum 3D distance from a UE to any BS [m] (coverage only)",
+)
+@click.option(
+    "--min-ue-spacing-m",
+    type=click.FloatRange(min=0.0),
+    default=2.0,
+    show_default=True,
+    help="Minimum horizontal spacing between UEs [m] (coverage only)",
+)
+@click.option(
+    "--cell-jitter",
+    type=click.FloatRange(min=0.0, max=1.0, max_open=True),
+    default=0.0,
+    show_default=True,
+    help="Intra-cell jitter fraction (coverage only)",
+)
+@click.option(
+    "--rm-center",
+    nargs=2,
+    type=float,
+    default=None,
+    help="Radio-map centre x y [m]; defaults to the target x y (coverage only)",
+)
+@click.option(
+    "--rm-size",
+    nargs=2,
+    type=float,
+    default=(100.0, 100.0),
+    show_default=True,
+    help="Radio-map size x y [m] (coverage only)",
+)
+@click.option(
+    "--rm-cell-size",
+    nargs=2,
+    type=float,
+    default=(1.0, 1.0),
+    show_default=True,
+    help="Radio-map cell size x y [m] (coverage only)",
+)
+@click.option(
+    "--rm-max-depth",
+    type=int,
+    default=5,
+    show_default=True,
+    help="RadioMapSolver max_depth (coverage only)",
+)
+@click.option(
+    "--rm-samples-per-tx",
+    type=int,
+    default=1_000_000,
+    show_default=True,
+    help="RadioMapSolver samples_per_tx (coverage only)",
+)
+@click.option(
+    "--rm-seed",
+    type=int,
+    default=42,
+    show_default=True,
+    help="RadioMapSolver seed, not the placement seed (coverage only)",
+)
+@click.option(
+    "--radio-map",
+    type=click.Path(exists=True, dir_okay=True, file_okay=True, path_type=Path),
+    default=None,
+    help="Reuse a saved radio map (json, placement dir or dataset dir)",
+)
 def rf_camera_multiview(
     xml_file: Path,
     output_dir: Path,
@@ -184,6 +474,25 @@ def rf_camera_multiview(
     frequency_bins: int,
     max_depth: int,
     synthetic_array: bool,
+    placement: str,
+    placement_seed: int,
+    pl_threshold_mode: str,
+    pl_threshold: float,
+    bs_aggregation: str,
+    orientation_policy: str,
+    face_bs: str,
+    pitch_deg: float,
+    building_clearance_m: float,
+    min_bs_distance_m: float,
+    min_ue_spacing_m: float,
+    cell_jitter: float,
+    rm_center: tuple[float, float] | None,
+    rm_size: tuple[float, float],
+    rm_cell_size: tuple[float, float],
+    rm_max_depth: int,
+    rm_samples_per_tx: int,
+    rm_seed: int,
+    radio_map: Path | None,
 ):
     """複数BS / multi-UEのRFカメラデータセットを生成します。
 
@@ -191,6 +500,11 @@ def rf_camera_multiview(
     全BSと全UEを1回のPathSolver呼び出しでトレースします。--bs-positionを
     繰り返すと複数のBSを配置でき、各BSは既定でtargetを向きます
     (--bs-look-atで個別の注視点も指定可能)。
+
+    --placement coverage ではUE高さの2Dパスゲイン(ラジオマップ)を計算し、
+    しきい値を超える建物外のセルから --placement-seed でUE姿勢を抽選します。
+    ラジオマップは placement/ に保存され、--radio-map で再利用すると
+    「保存マップ+seed」から同一の姿勢を再現できます。
     """
     from plateau_rt.application.scene_checks import check_scene_carrier_frequency
 
@@ -210,12 +524,6 @@ def rf_camera_multiview(
             f"--bs-look-at count ({len(bs_look_at)}) must match "
             f"--bs-position count ({len(bs_position)})"
         )
-    views = generate_ring_views(
-        target=target,
-        radius_m=radius_m,
-        ue_height_m=ue_height_m,
-        num_views=num_views,
-    )
     config = RFMultiViewConfig(
         carrier_frequency_hz=carrier_ghz * 1e9,
         bandwidth_hz=bandwidth_mhz * 1e6,
@@ -228,7 +536,55 @@ def rf_camera_multiview(
         max_depth=max_depth,
         synthetic_array=synthetic_array,
     )
-    RFMultiViewDataset(xml_file, views=views, config=config).run(output_dir)
+
+    if placement == "ring":
+        views = generate_ring_views(
+            target=target,
+            radius_m=radius_m,
+            ue_height_m=ue_height_m,
+            num_views=num_views,
+        )
+        RFMultiViewDataset(xml_file, views=views, config=config).run(output_dir)
+        return
+
+    if face_bs.isdigit():
+        face_bs_value: int | str = int(face_bs)
+    elif face_bs == "strongest":
+        face_bs_value = "strongest"
+    else:
+        raise click.BadParameter(
+            "must be a non-negative BS index or 'strongest'", param_hint="--face-bs"
+        )
+    try:
+        views, section = _plan_coverage_views(
+            xml_file=xml_file,
+            output_dir=output_dir,
+            config=config,
+            num_views=num_views,
+            placement_seed=placement_seed,
+            threshold_mode=pl_threshold_mode,
+            threshold_value=pl_threshold,
+            aggregation=bs_aggregation,
+            orientation_policy=orientation_policy,
+            face_bs=face_bs_value,
+            pitch_deg=pitch_deg,
+            building_clearance_m=building_clearance_m,
+            min_bs_distance_m=min_bs_distance_m,
+            min_ue_spacing_m=min_ue_spacing_m,
+            jitter_fraction=cell_jitter,
+            rm_center=rm_center,
+            rm_size=rm_size,
+            rm_cell_size=rm_cell_size,
+            rm_max_depth=rm_max_depth,
+            rm_samples_per_tx=rm_samples_per_tx,
+            rm_seed=rm_seed,
+            radio_map=radio_map,
+            ue_height_m=ue_height_m,
+            target=target,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
+    RFMultiViewDataset(xml_file, views=views, config=config, placement=section).run(output_dir)
 
 
 @cli.command("rf-camera-optical")

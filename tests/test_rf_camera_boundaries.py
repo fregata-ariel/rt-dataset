@@ -26,6 +26,7 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.application.rf_camera_delay",
     "plateau_rt.application.rf_camera_observe",
     "plateau_rt.application.rf_dataset_manifest",
+    "plateau_rt.application.ue_placement",
     "plateau_rt.application.optical_reference",
     "plateau_rt.application.scene_checks",
     "plateau_rt.application.solver_profile_report",

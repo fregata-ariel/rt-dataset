@@ -1,4 +1,4 @@
-.PHONY: build-mock sim-mock render-mock view-mock run-all-mock rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock rf-camera-multiview-mock rf-camera-optical-mock rf-camera-observe-mock rf-camera-partial-mock rf-gs-toy clean build-mock-city rf-camera-multiview-mock-city
+.PHONY: build-mock sim-mock render-mock view-mock run-all-mock rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock rf-camera-multiview-mock rf-camera-optical-mock rf-camera-observe-mock rf-camera-partial-mock rf-gs-toy clean build-mock-city rf-camera-multiview-mock-city rf-camera-coverage-mock rf-camera-coverage-mock-city rf-camera-optical-coverage-mock
 
 # PYTHONPATHを設定
 PYTHON := PYTHONPATH=./src/ python
@@ -15,6 +15,12 @@ MOCK_CITY_JSON := data/raw/mock_city.city.json
 MOCK_CITY_OUT  := $(MOCK_OUT)/mock_city/
 MOCK_CITY_XML  := $(MOCK_CITY_OUT)/mock_city.city.xml
 RF_CAMERA_MULTIVIEW_CITY_OUT := $(MOCK_OUT)/rf_camera_multiview_city/
+RF_CAMERA_COVERAGE_OUT := $(MOCK_OUT)/rf_camera_coverage/
+RF_CAMERA_COVERAGE_CITY_OUT := $(MOCK_OUT)/rf_camera_coverage_city/
+PLACEMENT_SEED ?= 0
+ORIENTATION_POLICY ?= face_bs
+RADIO_MAP ?=
+COVERAGE_RADIO_MAP_ARG := $(if $(RADIO_MAP),--radio-map $(RADIO_MAP),)
 
 build-mock:
 	$(PYTHON) -m plateau_rt.cli.main build $(MOCK_JSON) $(MOCK_OUT)
@@ -66,6 +72,28 @@ rf-camera-observe-mock:
 
 rf-gs-toy:
 	$(PYTHON) -m plateau_rt.experimental.rf_scatterer_study --out data/generated/analysis/rf_gs_toy/
+
+rf-camera-coverage-mock: build-mock
+	$(PYTHON) -m plateau_rt.cli.main rf-camera-multiview $(MOCK_XML) $(RF_CAMERA_COVERAGE_OUT) \
+		--placement coverage --placement-seed $(PLACEMENT_SEED) \
+		--orientation-policy $(ORIENTATION_POLICY) $(COVERAGE_RADIO_MAP_ARG) \
+		--num-views 8 --ue-height-m 1.5 --target 5 5 5 \
+		--bs-position -50 -50 30 --bs-position 60 35 25 \
+		--rm-center 0 0 --rm-size 80 80 --rm-cell-size 1 1 \
+		--pl-threshold-mode relative_to_max_db --pl-threshold 30 \
+		--building-clearance-m 1 --min-bs-distance-m 5 --min-ue-spacing-m 5
+
+rf-camera-coverage-mock-city: build-mock-city
+	$(PYTHON) -m plateau_rt.cli.main rf-camera-multiview $(MOCK_CITY_XML) $(RF_CAMERA_COVERAGE_CITY_OUT) \
+		--placement coverage --placement-seed $(PLACEMENT_SEED) \
+		--orientation-policy $(ORIENTATION_POLICY) $(COVERAGE_RADIO_MAP_ARG) \
+		--num-views 12 --ue-height-m 1.5 --target 0 0 8 --bs-position -70 5 25 \
+		--rm-center 0 0 --rm-size 120 120 --rm-cell-size 1 1 \
+		--pl-threshold-mode relative_to_max_db --pl-threshold 30 \
+		--building-clearance-m 2 --min-bs-distance-m 10 --min-ue-spacing-m 5
+
+rf-camera-optical-coverage-mock:
+	$(PYTHON) -m plateau_rt.cli.main rf-camera-optical $(RF_CAMERA_COVERAGE_OUT)
 
 clean:
 	rm -rf data/intermediate/* data/generated/*

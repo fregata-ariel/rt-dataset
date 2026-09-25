@@ -219,6 +219,89 @@ Unit tests (the Sionna adapter imports fine without a GPU):
 scripts/ci/run-unit-tests.sh
 ```
 
+## Coverage placement (#16)
+
+`--placement coverage` computes a 2D path-gain map (radio map) at UE height with
+Sionna's `RadioMapSolver`, keeps the cells above a threshold that are outside
+buildings and far enough from the base stations, and draws UE poses at random
+with a dedicated `--placement-seed`. The default `--placement ring` is
+unchanged.
+
+```bash
+make rf-camera-coverage-mock
+```
+
+or manually:
+
+```bash
+PYTHONPATH=./src uv run python -m plateau_rt.cli.main rf-camera-multiview SCENE.xml OUT \
+  --placement coverage --placement-seed 0 --orientation-policy face_bs \
+  --num-views 8 --ue-height-m 1.5 --target 5 5 5 \
+  --bs-position -50 -50 30 --bs-position 60 35 25 \
+  --rm-center 0 0 --rm-size 80 80 --rm-cell-size 1 1 \
+  --pl-threshold-mode relative_to_max_db --pl-threshold 30 \
+  --building-clearance-m 1 --min-bs-distance-m 5 --min-ue-spacing-m 5
+```
+
+Coverage options:
+
+| option | default | meaning |
+|---|---|---|
+| `--placement` | `ring` | `ring` or `coverage` |
+| `--placement-seed` | `0` | dedicated placement seed |
+| `--pl-threshold-mode` | `relative_to_max_db` | `absolute_db`, `relative_to_max_db` or `percentile` |
+| `--pl-threshold` | `30` | dB (absolute / below max) or percentile |
+| `--bs-aggregation` | `max` | `max`, `sum` or `all` over base stations |
+| `--orientation-policy` | `face_bs` | `look_at_target`, `face_bs` or `random_yaw` |
+| `--face-bs` | `strongest` | BS index or `strongest` for `face_bs` |
+| `--pitch-deg` | `0` | forward elevation for `random_yaw` |
+| `--building-clearance-m` | `1` | dilate the building mask [m] |
+| `--min-bs-distance-m` | `5` | minimum 3D distance to any BS [m] |
+| `--min-ue-spacing-m` | `2` | minimum horizontal UE spacing [m] |
+| `--cell-jitter` | `0` | intra-cell jitter fraction in `[0, 1)` |
+| `--rm-center` | target x y | radio-map centre x y [m] |
+| `--rm-size` | `100 100` | radio-map size x y [m] |
+| `--rm-cell-size` | `1 1` | cell size x y [m] |
+| `--rm-max-depth` | `5` | `RadioMapSolver` max_depth |
+| `--rm-samples-per-tx` | `1000000` | `RadioMapSolver` samples_per_tx |
+| `--rm-seed` | `42` | `RadioMapSolver` seed (not the placement seed) |
+| `--radio-map` | none | reuse a saved radio map (json, `placement/` dir or dataset dir) |
+
+Building interiors still receive a nonzero path gain (refraction through
+walls), so the indoor mask comes from an upward ray test: a cell centre whose
+ray straight up hits scene geometry is under a roof and is excluded, together
+with a horizontal `--building-clearance-m` dilation. Cells that are invalid
+(aggregated gain `<= 0` or non-finite), too close to a BS, below the threshold
+or excluded are never chosen.
+
+### Reproducibility
+
+Sionna GPU tracing is **not** bit-reproducible run to run (measured ~`6e-7`
+relative jitter in `path_gain`), so the radio map is saved as an artifact:
+
+```text
+OUT/placement/
+  radio_map.json
+  radio_map_path_gain.npy     # float32 [num_bs, ny, nx], linear
+  radio_map_indoor_mask.npy   # bool [ny, nx]
+```
+
+`radio_map.json` records the scene, carrier, base stations, grid and solver
+settings plus the sha256 of both `.npy` files. Passing the saved map back with
+`--radio-map` reuses the exact float32 arrays, so `saved map + placement_seed`
+reproduces the poses exactly; the placement is recorded in the manifest
+`placement` section, from which the views can be rebuilt:
+
+```python
+from plateau_rt.application.ue_placement import replan_from_manifest
+placement = replan_from_manifest("OUT")   # saved map + seed -> identical poses
+```
+
+Reusing a map requires the same carrier, base stations and UE height (checked
+before tracing); `--rm-*` options are ignored then. Changing only
+`--placement-seed` changes only the placement (and the traced views): every
+other manifest section stays equal.
+
 ## Expected Sionna CFR shape
 
 For the default 8-view, 2-BS mock:

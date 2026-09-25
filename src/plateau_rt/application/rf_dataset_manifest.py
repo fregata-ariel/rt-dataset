@@ -259,6 +259,11 @@ class RFDatasetManifest:
         return len(self.base_stations)
 
     @property
+    def placement(self) -> Mapping[str, Any] | None:
+        """The raw ``placement`` section (coverage placement, #16), or None."""
+        return self.raw.get("placement")
+
+    @property
     def view_ids(self) -> tuple[str, ...]:
         """View ids in manifest order."""
         return tuple(view.view_id for view in self.views)
@@ -802,6 +807,9 @@ def parse_rf_dataset_manifest(
         config=config,
         schema_value=data.get("path_schema"),
     )
+
+    if "placement" in data and not isinstance(data["placement"], Mapping):
+        raise ManifestError(f"'placement' must be a mapping, got {data['placement']!r}")
 
     return RFDatasetManifest(
         root=root,

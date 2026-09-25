@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -169,6 +170,7 @@ class RFMultiViewDataset:
         *,
         views: list[RFViewSpec],
         config: RFMultiViewConfig | None = None,
+        placement: Mapping[str, Any] | None = None,
     ):
         if not views:
             raise ValueError("at least one RF view is required")
@@ -176,6 +178,7 @@ class RFMultiViewDataset:
         self.views = list(views)
         self.config = config or RFMultiViewConfig()
         self.config.validate()
+        self.placement = dict(placement) if placement is not None else None
 
     def run(self, output_dir: Path) -> Path:
         output_dir = Path(output_dir)
@@ -341,6 +344,13 @@ class RFMultiViewDataset:
             "path_schema": PATH_SCHEMA_FILE_NAME,
             "views": manifest_views,
         }
+        if self.placement is not None:
+            ordered: dict[str, Any] = {}
+            for key, value in manifest.items():
+                ordered[key] = value
+                if key == "base_stations":
+                    ordered["placement"] = self.placement
+            manifest = ordered
         manifest_path = output_dir / "dataset_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 

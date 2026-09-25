@@ -8,6 +8,7 @@
 #   6. パスGTから aperture CFR が再合成できることの確認
 #   7. 前面/背面分割パターンが等方性素子を正確に分割していることの確認
 #   8. 光学レイレンダラーが mock ボックス形状と一致することの確認
+#   9. カバレッジマップUE配置 (#16): 保存ラジオマップ+seed の再現性確認
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
@@ -53,5 +54,17 @@ gpu_run python scripts/ci/check_hemisphere_split.py "${MOCK_OUT}/mock_building.c
 
 echo "🎨 Step 8: Optical ray renderer matches the mock box geometry"
 gpu_run python scripts/ci/check_optical_render.py "${MOCK_OUT}/mock_building.city.xml"
+
+echo "📍 Step 9: Coverage-map UE placement (#16) on the mock"
+COV="${MOCK_OUT}/coverage"
+rm -rf "${COV}"
+gpu_run make MOCK_OUT="${COV}/" rf-camera-coverage-mock rf-camera-optical-coverage-mock
+gpu_run make MOCK_OUT="${COV}/" RF_CAMERA_COVERAGE_OUT="${COV}/rerun_same_seed/" \
+  RADIO_MAP="${COV}/rf_camera_coverage/placement/radio_map.json" rf-camera-coverage-mock
+gpu_run make MOCK_OUT="${COV}/" RF_CAMERA_COVERAGE_OUT="${COV}/other_seed/" PLACEMENT_SEED=1 \
+  RADIO_MAP="${COV}/rf_camera_coverage/placement/radio_map.json" rf-camera-coverage-mock
+gpu_run python scripts/ci/check_coverage_placement.py "${COV}/rf_camera_coverage" \
+  --num-views 8 --num-bs 2 --mock-box \
+  --same-seed-rerun "${COV}/rerun_same_seed" --other-seed "${COV}/other_seed"
 
 echo "✅ Heavy CI finished"
