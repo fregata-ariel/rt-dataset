@@ -20,6 +20,7 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.domain.rf_camera.image_sources",
     "plateau_rt.domain.ground",
     "plateau_rt.domain.rf_camera.partial",
+    "plateau_rt.domain.rf_camera.placement",
     "plateau_rt.application.rf_camera_partial",
     "plateau_rt.application.rf_camera_calibration",
     "plateau_rt.application.rf_camera_delay",
