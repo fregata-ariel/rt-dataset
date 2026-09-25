@@ -1,2 +1,5 @@
 generated/*
+!generated/.gitkeep
 intermediate/*
+viewer/*
+!viewer/.gitkeep

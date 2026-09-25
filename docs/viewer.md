@@ -247,6 +247,67 @@ VIEWER_DATA=/path/to/store uv run uvicorn --factory plateau_rt.viewer.api:create
 Bind to `127.0.0.1` by default and expose the viewer only behind a TLS reverse proxy (V0-D1, #27).
 `python -m plateau_rt.viewer` also provides the `ingest` and `derive` commands (see "Command line").
 
+## Docker
+
+The `viewer` compose service runs the backend in a light image without CUDA or Sionna:
+
+```bash
+docker compose build viewer && docker compose up viewer
+# or
+make viewer-up    # http://127.0.0.1:8765/
+make viewer-down
+```
+
+The image is built from two extra stages in `docker/Dockerfile`: `viewer-base`
+(ubuntu:24.04 + uv + Python, no CUDA) and `viewer`
+(`uv sync --locked --only-group viewer`, so no sionna-rt / mitsuba / drjit / matplotlib —
+only what the viewer imports: fastapi, uvicorn, httpx, numpy, scipy, trimesh, defusedxml).
+`--locked` still needs the metadata of the `sionna-rt` path dependency, so only
+`third_party/sionna-rt/pyproject.toml` (static metadata, no build) is copied into the stage; the
+build therefore needs the submodule checked out (`git submodule update --init`), as the other
+images do.
+
+Image size: about 426 MB (406 MiB, `docker image inspect -f '{{.Size}}'`, measured 2026-09),
+compared with about 1.34 GB for the CUDA + Sionna `prod` image.
+
+`data/viewer/` and `data/generated/` are tracked with a `.gitkeep` so the bind-mount sources exist
+and belong to the user; a missing source directory would be created by the Docker daemon as root
+and the container user (UID `VIEWER_UID`, default 1000) could not write the store.
+
+Compose variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `VIEWER_PORT` | `8765` | Host port published on `127.0.0.1` (container port 8000). |
+| `VIEWER_DATA_DIR` | `./data/viewer` | Viewer store (`/data`). |
+| `VIEWER_IMPORT_ROOT` | `./data/generated` | Directory imports source, mounted read-only at `/import`. |
+| `VIEWER_UID` / `VIEWER_GID` | `1000` / `1000` | User/group the container runs as (so bind mounts stay writable). |
+| `VIEWER_MEM_LIMIT` | `8g` | Container `mem_limit`. |
+| `VIEWER_MAX_UPLOAD_BYTES` | `4GiB` | Maximum upload body size. |
+| `VIEWER_MAX_EXTRACTED_BYTES` | `16GiB` | Extraction cap. |
+| `VIEWER_MAX_FILES` | `100000` | Maximum entries extracted from one archive. |
+| `VIEWER_MAX_ARRAY_BYTES` | `1GiB` | Largest `.npy`/`.npz` array accepted. |
+| `VIEWER_DERIVE_TIMEOUT_S` | `120` | Per-derivation timeout, including child start-up. |
+| `VIEWER_DERIVE_MEM_BYTES` | `3GiB` | Per-derivation `RLIMIT_AS` (not the 4 GiB code default; see below). |
+| `VIEWER_MAX_CONCURRENT_DERIVES` | `2` | Worker threads shared by eager and lazy jobs. |
+
+`VIEWER_IMPORT_ROOTS` is fixed to `/import` and `VIEWER_ALLOWED_HOSTS` to
+`127.0.0.1,localhost` in compose.
+
+Memory rule: `mem_limit` must stay above
+`VIEWER_DERIVE_MEM_BYTES` x `VIEWER_MAX_CONCURRENT_DERIVES` + the server itself, hence the
+compose default of 3 GiB x 2 derivations < 8g (rather than the 4 GiB code default, which would
+not fit two concurrent derivations plus the server under 8g).
+
+The published port binds `127.0.0.1` only (V0-D1, #27): the viewer is a localhost service,
+reached from outside only through a TLS reverse proxy. Directory imports read from `/import`,
+which is mounted read-only. The image has a healthcheck on `GET /api/health` (via `127.0.0.1`,
+matching the default `VIEWER_ALLOWED_HOSTS`), so `docker compose up --wait viewer` (as used by
+`make viewer-up`) returns once the backend is healthy.
+
+The CI smoke (`scripts/ci/run-viewer-smoke.sh`, see [docs/ci.md](ci.md)) checks the image
+contents and drives the same HTTP flow against a container started from this service.
+
 ## Jobs
 
 A derivation is never computed inside a request when it is missing from the cache: the derive

@@ -1,7 +1,8 @@
-# イメージは docker/Dockerfile のマルチステージから3つだけ作る:
+# イメージは docker/Dockerfile のマルチステージから作る:
 #   base : ${IMAGE_PREFIX}-base  CUDA base + OS ライブラリ + uv + Python
 #   prod : ${IMAGE_PREFIX}       本番 (uv.lock 通りの依存 + test ツール + src)。CI もこれを使う
 #   dev  : ${IMAGE_PREFIX}-dev   Devcontainer 用 (prod と同じ依存 + 開発ツール + src)
+#   viewer : ${IMAGE_PREFIX}-viewer  CUDA/Sionna なしの viewer (viewer グループのみ + src)
 #
 # IMAGE_PREFIX: イメージ名の接頭辞 (既定: plateau-sionna)。
 #   CI は別の接頭辞を使い、開発者のイメージタグを上書きしない。
@@ -76,3 +77,30 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+
+  # Web viewer (GPU・Sionna なし)。docker compose up viewer -> http://127.0.0.1:8765/
+  viewer:
+    image: ${IMAGE_PREFIX:-plateau-sionna}-viewer:latest
+    build:
+      <<: *build
+      target: viewer
+    # bind mount したディレクトリに書けるよう、ホストの UID で実行できるようにする (既定 1000 = app)
+    user: "${VIEWER_UID:-1000}:${VIEWER_GID:-1000}"
+    ports:
+      - "127.0.0.1:${VIEWER_PORT:-8765}:8000"
+    volumes:
+      - ${VIEWER_DATA_DIR:-./data/viewer}:/data
+      - ${VIEWER_IMPORT_ROOT:-./data/generated}:/import:ro
+    environment:
+      VIEWER_IMPORT_ROOTS: /import
+      VIEWER_ALLOWED_HOSTS: 127.0.0.1,localhost
+      VIEWER_MAX_UPLOAD_BYTES: ${VIEWER_MAX_UPLOAD_BYTES:-4GiB}
+      VIEWER_MAX_EXTRACTED_BYTES: ${VIEWER_MAX_EXTRACTED_BYTES:-16GiB}
+      VIEWER_MAX_FILES: ${VIEWER_MAX_FILES:-100000}
+      VIEWER_MAX_ARRAY_BYTES: ${VIEWER_MAX_ARRAY_BYTES:-1GiB}
+      VIEWER_DERIVE_TIMEOUT_S: ${VIEWER_DERIVE_TIMEOUT_S:-120}
+      # 既定 3 GiB (コード既定 4 GiB ではなく): 2 並列 + server で mem_limit 8g に収めるため
+      VIEWER_DERIVE_MEM_BYTES: ${VIEWER_DERIVE_MEM_BYTES:-3GiB}
+      VIEWER_MAX_CONCURRENT_DERIVES: ${VIEWER_MAX_CONCURRENT_DERIVES:-2}
+    # 派生の子プロセス (VIEWER_DERIVE_MEM_BYTES x VIEWER_MAX_CONCURRENT_DERIVES = 6 GiB) + server より大きく
+    mem_limit: ${VIEWER_MEM_LIMIT:-8g}

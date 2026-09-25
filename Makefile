@@ -1,4 +1,4 @@
-.PHONY: build-mock sim-mock render-mock view-mock run-all-mock rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock rf-camera-multiview-mock rf-camera-optical-mock rf-camera-observe-mock rf-camera-partial-mock rf-gs-toy clean build-mock-city rf-camera-multiview-mock-city
+.PHONY: build-mock sim-mock render-mock view-mock run-all-mock rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock rf-camera-multiview-mock rf-camera-optical-mock rf-camera-observe-mock rf-camera-partial-mock rf-gs-toy clean build-mock-city rf-camera-multiview-mock-city viewer-up viewer-down
 
 # PYTHONPATHを設定
 PYTHON := PYTHONPATH=./src/ python
@@ -69,3 +69,13 @@ rf-gs-toy:
 
 clean:
 	rm -rf data/intermediate/* data/generated/*
+
+# viewer (docker compose, GPU 不要): http://127.0.0.1:$(VIEWER_PORT)/
+VIEWER_PORT ?= 8765
+viewer-up:
+	mkdir -p data/viewer data/generated
+	VIEWER_PORT=$(VIEWER_PORT) docker compose up -d --build --wait viewer
+	@echo "viewer: http://127.0.0.1:$(VIEWER_PORT)/"
+
+viewer-down:
+	VIEWER_PORT=$(VIEWER_PORT) docker compose down viewer
