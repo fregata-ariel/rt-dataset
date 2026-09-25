@@ -1,6 +1,6 @@
 # RF tomography baselines: intensity, delay, phase, all hybrids, simultaneous and non-simultaneous capture
 
-Target file: `docs/tomography_baselines.md`. Status: design approved 2026-09-25 (all §9.2 defaults adopted); Phase 0 (T01–T10) is implemented on `explore/tomography-p0` and pending integration; its pinned conventions and deviations are in the Phase 0 implementation notes at the end of §8 Phase 0. This document merges three independent proposals: a physics and signal-processing design, a hybrid-fusion design, and an evaluation-and-data design. §1.4 records each conflict between them and why it was resolved the way it was. This revision also resolves the critique of the first draft. The main changes are:
+Target file: `docs/tomography_baselines.md`. Status: design approved 2026-09-25 (all §9.2 defaults adopted); Phase 0 (T01–T10) is integrated on `dev/m2-tomography`, and Phase 0–1 (T01–T16, T15b) are implemented on `explore/tomography-p1`; the pinned conventions, deviations and measured evidence are in the Phase 0 and Phase 1 implementation notes at the end of §8 Phase 0 and §8 Phase 1. This document merges three independent proposals: a physics and signal-processing design, a hybrid-fusion design, and an evaluation-and-data design. §1.4 records each conflict between them and why it was resolved the way it was. This revision also resolves the critique of the first draft. The main changes are:
 
 - a LoS atom with its phase fixed by the model;
 - a phase-only global gauge;
@@ -1010,6 +1010,136 @@ Phase 0 is implemented on `explore/tomography-p0`. Each task is one module under
 - The runner computes `ill_posed` via T15b.
 - Tests: the §6.7 micro-scene criteria and the output schemas.
 - Deps: T15, T15b; multi-bs for v3.
+
+#### Phase 1 implementation notes
+
+Phase 1 (T11–T16 with T15b) is implemented on `explore/tomography-p1` on top of Phase 0. The E1/E2 solvers live in `rt/solvers/` (NumPy/SciPy only; both `__init__.py` files stay docstring-only), the registry and the identifiability test in `rt`, and the runner in two Sionna-free application modules that are listed in `tests/test_rf_camera_boundaries.py`. Every number below was measured in the ci container on CPU unless stated otherwise. Phase 2 must treat the conventions in this subsection as binding, together with those of the Phase 0 notes.
+
+| Task | Module | Main entry points |
+|---|---|---|
+| T11 | `solvers/bp.py` | `power_map`, `intensity_map` (+ `log_mean_fusion`), `splat_returns`, `envelope_map`, `coherent_map`, `roi_grid`, `roi_refine` (`RoiResult`), `envelope_bp_fn`, `blind_tau_search`, `node_data`, `capture_weights`, `power_column_norm` |
+| T12 | `solvers/power.py` | `kl_em`, `is_mlem`, `nn_fista_l1` (`PowerSolution`), `prune_support`, `support_points`, `support_edges`, `support_to_map`, `kl_objective`, `is_objective` |
+| T13 | `solvers/coherent.py` | `tikhonov_lsqr`, `complex_l1_fista`, `mmv_group_lasso` (`CoherentResult`), `lipschitz_constant`, `lambda_max`, `point_density`, `roi_grids_from_detections`, `roi_points` |
+| T14 | `gauges.py` | `nuisance_points`, `fit_los_ground`, `power_xcorr_delay`, `varpro_cost_and_grad`, `self_calibrate` |
+| T15 | `configs.py` | `CONFIGS` (40 names), `Config`/`Step`/`NStrategy`/`HyperRange`, `get_config`, `lattice_configs`, `LATTICE_EDGES`, `NODE_GAUGE_SENSITIVITY`, executors `run_e1`, `run_roi`, `run_support`, `run_e2` (`E2Output`) |
+| T15b | `identifiability.py` | `numeric_jacobian`, `gauge_reduced_fim`, `ill_posed`, `return_model` |
+| T16 | `application/rf_tomography_io.py`, `application/rf_tomography_benchmark.py`, CLI `rf-tomo-bench` | `load_dataset`, `GroundTruth`/`find_ground_truth`/`write_ground_truth`, `run_benchmark`, `SUITES`, `TRACKS`, `estimate_gauges`, `ill_posed_at`, `detect`, `detection_metrics` |
+
+Phase 0 was extended in one place only: `SeparableOperator` gained the read-only properties `beta_model`, `geom`, `bins` and `freq_offsets` and a keyword-only `bins=` restriction (`None` is bit-identical to before). The test fixture `write_v3_dataset` gained `bs_positions` and `bs_look_at` (defaults byte-identical).
+
+**Pinned conventions.**
+
+- **E1 maps are GLRT-normalised** (T11). Power nodes: `k(x)ᵀ(y − floor)/‖k(x)‖`, with the column norm in closed form (`power_column_norm`, equal to the `PowerOperator` column norm to 1e-15). Envelope: Σ_c |bp_c|²/|γ_c|². Coherent: |Σ_c bp_c|²/Σ_c |γ_c|². `I`/`I@n0` fuse the per-capture GLRT maps with `log_mean_fusion` (per-capture peak normalisation, floor 1e-3, geometric mean). Maps are exactly 0 at singular points.
+- **Gauge plumbing** (T11, T15). E1 takes `tau_hat = τ̂` and samples c(u, τ(x) + τ̂_c); the ROI stage de-gauges Y with `apply_gauge(Y, −φ̂, −τ̂)`; coherent E2 passes the gauges to `SeparableOperator(gauges=…)`; power E2 passes τ̂ to `power_operator`. With the true gauges on the N track, DP/IDP E1, Tikhonov E2 and ROI reproduce S to ≤ 4e-16, ≤ 4e-16 and identical positions. All modules share the Phase 0 sign (`sync.gauge_factor` = `gauge.align_common_phase_and_delay`); φ is wrapped to (−π, π] and τ to [−T/2, T/2); the reference capture c0 = (`nested_view_order(V, seed)[0]`, 0) gets φ = 0 exactly and its τ is estimated.
+- **ROI window.** `bp.roi_grid` (E1 ROI refinement) is a cube of floor(2·half_width/spacing) + 1 points per axis centred on the detection (24³ at λ/4 = 2.14 cm, half_width 0.25 m); `coherent.roi_grids_from_detections` (coherent E2 ROI support) uses an odd count 2·ceil(half_width/spacing) + 1 with the centre voxel on the detection (25³). `roi_refine` polishes every candidate lobe (≥ 0.5 of the window maximum) by first-order phase extrapolation, 3 steps per half cell.
+- **Support pruning** (T12, T15): `prune_support` seeds `metrics.nms_peaks` at ≥ 1e-2 of the maximum of the configuration's own E1 map, dilates by a 2 m ball and caps at 5e4 voxels by density. `run_support` returns (indices, points, 6-neighbour edges).
+- **Power E2** (T12): μ = Kx + `noise_floor`. KL-EM minimises Σ(μ − y + y log(y/μ)); IS-MLEM minimises the exponential NLL Σ(y/μ + log μ) with the monotone Févotte–Idier exponent 1/2; NN-FISTA is MFISTA on ½‖Kx + b − y‖² + λ Σx (+ Huber-smoothed anisotropic TV on the support graph), x ≥ 0, λ relative to λ_max = max Kᵀ(y − b). The EM/MM start is the constant (Σy − Σb)/ΣKᵀ1. Every objective history is non-increasing.
+- **Coherent E2** (T13): MFISTA with exactly one forward and one adjoint per iteration (power-iteration calls counted); `lambda_max` gives x = 0 exactly; `point_density` is |x|² (shared), the (V, B) mean of |x|² (per_view) and the coefficient power (constrained). Solver-level `damp`/`lam` are absolute; the registry makes them relative (damp × σ_max, lam × λ_max).
+- **Nuisance atoms** (T14): `fit_los_ground` works in VS space on one capture with the LoS source t_b and its ground mirror at z = 0. Complex mode: exact LS with the LoS amplitude real ≥ 0 (phase fixed by the model), ground amplitude free, τ profiled (16 grid points per bin, bounded Brent). Power mode: NNLS on the 4× delay-oversampled |c(u,t)|² volume, φ = NaN.
+- **Self-calibration** (T14): each iteration de-gauges, solves, re-profiles every capture's (φ, τ) against `op_factory(None).forward(x)` with `align_common_phase_and_delay`, then fixes φ[ref] = 0 and rotates x; stop at a relative loss change ≤ 1e-4.
+- **Registry** (T15): 40 configurations = 14 core, 3 completion (sync `any`: run once), 11 omni, 2 1el (element (3,3)), 2 partial-D, 8 sync variants (S_τ only for φ- and τ-sensitive nodes, N-sep for every gauge-sensitive node). `gauge_unknowns` = `SYNC_UNKNOWNS[sync]` ∩ `NODE_GAUGE_SENSITIVITY[node]`. P/IP E2 fit bin n0 only (`bins=(N/2,)`); P_W/IP_W and P×K/IP×K solve one operator per bin (per-view resp. shared amplitudes) and average the densities. Tuning ranges have 20 log-spaced trials; `E2_ITERATIONS = 200`. Unimplemented stages are listed in `Config.planned`; there is no ill-posed field.
+- **Identifiability** (T15b, T16): F = Jᵀ W J; the Schur complement is a Jacobian-level projection onto the complement of the unit-normalised nuisance columns (SVD cutoff 1e-8), so the global-phase null disappears when all φ_c and the complex amplitudes are nuisance; `ill_posed` takes cond and the per-coordinate CRB std of the position-marginal FIM (cond_max 1e8, std_max 10 m). The runner evaluates it at the top 4 E1 detections whose per-capture LS SNR ρ reaches 10: list nodes (D, ID: u_y, u_z, t; I, I@n0, P_W, IP_W: u_y, u_z; omni D/ID/DP/IDP: t; I-o, IP-o, P-o: none, always flagged) with the isolated-path 3-D harmonic CRB as Gaussian weight; complex nodes with 2/σ² on the node's bins or element; nuisance = amplitudes + gauge unknowns (V·B, or V + B for N-sep).
+- **Runner** (T16): a job is (config, track, space); its strategies are `none`, the registered ones and `oracle` (none only when the config has no gauge unknowns). Tracks: ideal-S, ideal-N, N-sep, S_τ. Used gauges are masked to the unknowns. Detection: `nms_peaks` radius 1.5·spacing, threshold 5 % of the map range, sorted by score; metrics at 0.5/1/2/4 m, AP@1 m, recall at 1 FA/1000 m³, decomposed error at 1 m. Outputs: `results.jsonl` (`rf_tomo_result/1`, 25 keys in fixed order, non-finite → null), `recon/<scene>/<config>/<stage>-<solver>/<track>.<space>.<strategy>.rNNN.npz`, `run_manifest.json` (`rf_tomo_run/1`, versions, sha256 of manifest/apertures/GT/results, noise, grid). Suites: unit (bv, 5×5×3 at 2 m, E2 10 its), smoke (bv+vs, ±(10,10,6) m at 2 m, E2 10 its), full (5 realisations, 0.5 m, 200 its). `workers > 1` uses a spawn process pool; rows are identical to a sequential run apart from `runtime_s`. The dataset's `tx_pattern` must be `tr38901` (guard added by the final review; every operator uses its default pattern and the scalar polarisation).
+
+**Deviations from the §8 entries, with evidence.** No acceptance threshold was relaxed.
+
+1. **T11 power E1 is the GLRT, not raw Kᵀy.** Dirichlet-sampled columns vary ~3× in norm with sub-cell position (picket fence). Noiseless point, 0.25 m grid: raw argmax 0.67–1.74 m off, GLRT 0.05–0.33 m; micro scene: raw up to 3.7 m (fails 1.2 m), GLRT ≤ 0.42 m over 20 seeds.
+2. **T11 envelope/coherent maps are divided by |γ|².** Without it the 1/(r₁r₂)² weighting biases peaks 0.3–0.5 m toward the UEs and the BS.
+3. **T11 ROI lobe polishing.** The 4-view coherent PSF is a lattice of grating lobes (lobes 0.07–0.3 m away reach 98–99.7 % of the main lobe; λ/4 is Nyquist-critical for a bistatic gradient of norm ~2). Grid argmax: 0.47 m worst over 20 seeds; polished: 0.23 m. With two BSs (8 captures) the error drops to 0.002 m.
+4. **T11 blind τ search** builds a consensus from delay-marginalised (angle-only) maps at N delays over one period, then picks each capture's delay that maximises its envelope at the consensus points. The literal "maximise cross-view consistency" is biased by 2–45 ns. L0a micro, 30 dB: ≤ 0.10 ns (tricubic `bp_fn`; trilinear 0.9–1.4 ns). Two points 11 m apart: 2.3–4.1 ns.
+5. **T11 D splatting is voxel-driven** (gather form, Dirichlet angle and Gaussian delay footprints, log-odds p_hit 0.7 / p_false 0.05); micro geometry pinned: 4 views on r = 15 m at heights 1.5/12/1.5/12 m, one overhead BS (3, −2, 40), 100 MHz, 16 bins, 4×4, points near voxels (0,0,1) and (4,4,1). A side BS puts views in forward scatter (flat bistatic delay), and points 5.7 m apart merge into one E1 peak.
+6. **T12 two-point test setup.** The 3 m pair is unresolved in E1 (1/15 cases) and the 2 m ball around the biased E1 peak misses one point, so the test prunes with radius 3 m. The incoherent model mismatch of coherent data at 3 m is 0.34–0.66 (§3.3): KL-EM 10/15 and IS-MLEM 9/15 cases, NN-FISTA with the LS loss 4/15, so NN-FISTA (± TV) is tested on 8-look data (independent point phases per look, still from `atom_cfr`). KL/IS are the recommended power solvers.
+7. **T12 TV** is Huber-smoothed anisotropic TV on the 6-neighbour support graph (keeps the objective evaluable and MFISTA monotone).
+8. **T13** MMV test randomises only φ_c (per-view amplitudes cannot absorb τ_c; with τ_c also random the per-view MMV recovers 0/22 seeds, see spot checks).
+9. **T14 power-mode LoS fit** uses the 4× delay-oversampled |c|² volume: on the native ID grid an atom near a delay sample carries no sub-bin information (0.85–2.3 ns errors), oversampled ≤ 0.092 ns. The self-calibration test uses the phantom's own support, Tikhonov damp 0.1·σ_max and n_iter = 30 (pruned supports with distractors do not converge in 10–30 alternations; 1 of 16 zero-init seeds falls in a local minimum). The LoS test uses N = 32 (at N = 16 the two unmodelled L0e walls bias τ by 0.077 ns).
+10. **T15** adds `SeparableOperator(bins=…)` (a `CaptureGeometry` cannot have N = 1, and full-band E2 sliced afterwards costs N×). Stages without a Phase 1 callable are `planned`: D E2 (occupancy fit); D-N anchors/min-entropy/pseudoranges; P-N/IP-N narrowband LoS anchor; 1el E2 (element-subset operator); E1 of D-o, IP-o, P-o, DP-o, IDP-o (ellipsoid BP); E3 everywhere. The delay-marginalised N fallback (§4.1 (c)) is the sub-node row (IP_W for IDP-N, P_W for DP-N, I-N for ID-N). Phase-only E2 (P, DP, P×K) runs the coherent solvers on PHAT data; projected-normal IRLS is planned. D_PHAT and T(u,t) are not registered. The omni lattice mirrors WB with the invariance edge D-o → DP-o.
+11. **T15b** takes cond and CRB std on the position-marginal FIM (cond over mixed units is meaningless) and forms the Schur complement at the Jacobian level (a FIM-level pseudo-inverse loses the one-view null to cancellation: cond 7e10 instead of ≥ 1.6e16). `return_model` (the D-list mean) was added. The T24c note "(1 VS, 2 views) is flagged" does not follow from a null space (6 measurements, 5 unknowns); T24c must compute it.
+12. **T16**: extra options (`--configs`, `--strategies`, `--spaces`, `--gt`, `--seed`, `--grid-*`, `--workers`, `--overwrite`); the observed-* tracks are not supported (`make_tracks` collapses their hemisphere axis; T32); `ill_posed_at` uses Gaussian placeholder weights and fits per-capture amplitudes from complex Y for every node (weights only; T30 replaces it); `self_cal`/`varpro` run on the support of the ungauged E1 map with the node data normalised to unit RMS (L-BFGS stalls at iteration 0 otherwise).
+
+**Acceptance evidence (task tests).**
+
+| Criterion | Measured | Gate |
+|---|---|---|
+| T11 ID-S / IDP-S both micro points after refinement (20-seed reference) | max 0.42 / 0.29 m | 1.2 m |
+| T11 IDP-S ROI, one 0.5 m window at λ/4 (20 seeds) | max 0.23 m (tests: seeds 0–2) | 0.25 m |
+| T11 blind τ, L0a micro, 30 dB, σ_t 10 ns (10 seeds) | max 0.10 ns | 1 ns |
+| T11 N with τ̂ = τ vs S; sync-invariant nodes S vs N | ~1e-15; ~5e-16 | 1e-10 |
+| T12 monotone objectives (all runs) | Δobj ≤ 1e-12·max\|obj\| | non-increasing |
+| T12 two points 3 m apart on L0 within 1 m | KL 0.30/0.32 m, IS 0.19/0.31 m (single look); FISTA 0.66/0.34 m, +TV 0.65/0.22 m (8 looks) | 1 m |
+| T12 optimality vs L-BFGS-B (60×8) | rel. objective gap 1e-13 … 2e-16 | 1e-9 |
+| T13 LSQR vs dense solve | 1.7e-12 … 4.7e-10 | 1e-6 |
+| T13 MMV support, L0c K = 4, random φ_c (seeds 9/12/17) | 4/4 at 1 m; shared-model control 0/4 | recall 1.0 |
+| T14 LoS present, 30 dB, injected ε_LoS ~ U(±5°) | \|φ̂ − φ − ε\| ≤ 0.334°, τ ≤ 0.011 ns | 1° + \|ε\|, 0.05 ns |
+| T14 free complex LoS amplitude | loss invariant to θ (8e-15), φ unrecoverable | control |
+| T14 self-cal L0c K = 4, V = 8, 30 dB (seeds 0/7/11) | ≤ 0.207°, ≤ 0.0138 ns, ΔNMSE ≤ +0.41 dB | 2°, 0.05 ns, 1 dB |
+| T15 names, callables, lattice edges (NB 4, WB 12, omni 12), no ill-posed field | all pass; sensitivity table checked numerically (invariant ≤ 6e-16, sensitive ≥ 3.1e-2) | — |
+| T15b one-view D-N flagged / D-S not | cond = inf / 375 (std 0.14 m) | flag / not |
+| T15b eight views, three shared VS | cond 2957, max std 0.094–0.099 m | not flagged |
+| T15b global-phase null removed (IDP-N, 8 views) | cond 6067, std 2.95 mm; equals fixing φ_c0 to 6.5e-12 | not flagged |
+| T16 every node runs E1 and E2 on the micro dataset | 40 configs, 0 error rows | finite |
+| T16 ID-S, IDP-S within 1.2 m; IDP-S ROI within 0.25 m; D-N `ill_posed` equals the rebuilt test | tp = 2; tp = 2; 1e-9 | §6.7 |
+
+**Independent review spot checks.** Reviewer scripts on seeds the task tests do not use (ci container, CPU).
+
+- **E1 localisation (T11/T15 executors), micro scene, seeds 100–119** (tests use 0–2): top-2 detections after sub-voxel refinement, worst point of the pair: ID-S max 0.40 m (median 0.31), IDP-S 0.32 m (0.26), D-S 1.36 m (18/20 within 1.2 m), I-S 3.2 m (3/20); IDP-S ROI 0.20 m (median 0.13, 20/20 ≤ 0.25 m).
+- **E1 on the default 8-view ring** (r = 30 m, 8×8, 64 bins, L0a, 10 seeds, 1 m grid): IDP-S ≤ 0.12 m; ID-S 0.6–1.7 m. The ID-S statistic is unbiased (argmax on a 0.1 m grid 0–0.2 m tricubic, ≤ 0.41 m trilinear); the error is the 1 m sampling of a ~1.5 m range lobe plus quadratic refinement. L0c K = 4 (points within 20 dB, 10 seeds, 8 detections): recall at 1 m 8/32 (ID-S) and 10/32 (IDP-S), at 2 m 16/32 and 13/32 — E1 alone does not resolve multi-point scenes on this capture; E2/E3 must.
+- **E2 power, L0b 3 m pairs, fresh seeds 10–15 × {range, cross_range}** (T12 setup, single coherent look, 20 dB): no objective increase in 240 runs (max relative rise 0). Both points within 1 m: KL-EM 10/12, IS-MLEM 8–9/12, NN-FISTA 1–4/12, NN-FISTA + TV 1–4/12, E1 0–1/12. With the registry's GLRT E1 support the default 2 m radius is enough (KL 10/12 at 2 m and 3 m); with the raw adjoint support KL drops to 7/12 at 2 m (T12 deviation 1 applies to the raw adjoint only).
+- **MMV support, L0c K = 4, seeds 40–79 with all points ≥ 3 m apart (22 seeds)**, random φ_c, per_view, λ = 0.01 λ_max: 4/4 at 1 m in 15/22, at 1.5 m in 19/22 (T13 prototype: 16/19, 18/19); with random τ_c as well: 0/22 (per-view amplitudes do not absorb τ, §4.3); shared-model control: 1/22. Every objective history non-increasing.
+- **Self-calibration, L0c K = 4, V = 8, 30 dB, seeds 20–31** (true support, Tikhonov 0.1·σ_max, n_iter 30), errors recomputed independently (circular-mean global phase, delay mod T): 11/12 meet all three gates (worst 0.125°, 0.012 ns, +0.11 dB). Seed 24 recovers the gauges (0.56°, 0.039 ns) but its NMSE is +1.59 dB over S and it needed 24 alternations (the default n_iter = 10 would stop unconverged).
+- **Identifiability with an analytic Jacobian** (VS D list, three VS, σ_u 1e-3, σ_t 30 ps; the analytic (u_y, u_z, t) equals `return_model` to 1e-12): one-view D-N flagged (9 observations for 10 unknowns, cond = inf); one-view D-S not flagged (cond 45, max std 5 cm); two views cond 37 (2.7 cm); eight views cond 7.4 (1.1 cm).
+- **Runner end to end**: five fresh micro datasets (seeds 10–14) through the unit and smoke suites with every registered strategy, 4 spawn workers: 401 / 802 rows each, 0 error rows. Unit suite: ID-S, IDP-S, DP-S, D-S find both points at 1 m in 5/5; IDP-N without gauge correction also does (the 5×5×3 grid with points ≤ 0.2 m from voxel centres is too coarse to expose the gauge; see limitations).
+- **Shared ROI window (tried and reverted).** Replacing T11's 24³ ROI window with T13's centred 25³ window changes the IDP-S ROI worst case from 0.20 to 0.27 m on seeds 100–119 (19/20 ≤ 0.25 m) and 0.23 → 0.24 m on seeds 0–19. The ROI result sits at the grating-lobe ambiguity (0.1–0.27 m) and depends on the sampling lattice, so the two window definitions were left as they are (open item).
+- **Unit suite under host load**: 959 passed in 96 s on an idle host and in 21 min at load average ~20 (multi-threaded BLAS on thin GEMMs, see T13); CI runners must not be oversubscribed or should pin `OMP_NUM_THREADS`.
+
+**First benchmark results (smoke suite).**
+
+Measured by the final review with `rf-tomo-bench` (R = 1, 30 dB, σ_t 10 ns, E2 capped at 10 iterations). "tp@1 m" is the number of GT points matched within 1 m among all detections of the row (up to 8), averaged over datasets.
+
+*Micro datasets* (five fresh §6.7 micro datasets, seeds 10–14, 2 BV points; smoke grid ±(10, 10, 6) m at 2 m, bv rows; every run 802 rows, 0 errors):
+
+| Config (strategy) | E1 tp@1 m (of 2) | ROI / best E2 tp@1 m | gauge error (max) |
+|---|---|---|---|
+| IDP-S | 2.0 | ROI 2.0; mmv_per_view 2.0 | – |
+| DP-S | 2.0 | ROI 2.0; mmv_per_view 2.0 | – |
+| D-S | 2.0 | (no E2) | – |
+| ID-S | 1.6 | kl_em, is_mlem 2.0 | – |
+| P-S / IP-S | 0.6 / 0.4 | ≤ 0.4 / 0.0 | – |
+| I-S = I-N | 0.4 | kl_em 0.6 (2.0 at 2 m) | – |
+| I@n0 / P_W / IP_W | 0.0 / 1.0 / 0.4 | kl_em 0.4 / 0.0 / 0.0 | – |
+| IDP-N none / blind / oracle | 1.0 / 2.0 / 2.0 | ROI 1.2 / 2.0 / 2.0 | τ 22.6 / 4.2 / 0 ns |
+| DP-N none / blind / oracle | 1.4 / 0.6 / 2.0 | ROI 1.2 / 1.2 / 2.0 | τ 22.6 / 34.5 / 0 ns |
+| ID-N none / xcorr / oracle | 1.8 / 1.6 / 1.4 | kl_em 1.2 / 1.6 / 2.0 | τ 22.6 / 4.8 / 0 ns |
+| D-N none / oracle | 0.0 / 2.0 | – | τ 22.6 / 0 ns |
+| IDP-N self_cal / varpro | 1.2 / 1.2 | mmv_per_view 1.4 / 1.4 | φ 172–177°, τ 7.0–7.4 ns (not converged on the pruned support) |
+| *-N los | 0.0–0.4 | ≤ 0.4 | τ ≈ 19.5 ns: the micro data contain no LoS, and the runner fits one anyway |
+
+*GPU mock* (`rf-camera-multiview-mock`: mock box, 8 ring views, 2 BS, 8×8, N = 64, almost LoS-only; T16's scratch GT).
+
+- **VS LoS check** (`--spaces vs --grid-center 60 35 25 --grid-half-size 6 6 6`, grid 7³ at 2 m around bs_001, strategies none/los/oracle; 308 rows, 0 errors, 13 min with 4 workers). Distance of the top detection to t_b: ID-S 0.14 m (kl_em 0.13), IDP-S 0.18 m → ROI 0.00 m (Tikhonov 0.00, MMV 0.02), DP-S 0.17 → ROI 0.02 m, IDP-1el/DP-1el 0.08/0.06 → ROI 0.02 m, IP_W/P_W 0.27/0.71 → E2 0.03–0.04 m, IP-S E1 1.27 m (E2 0.04–0.09 m, ROI 4.3 m), P-S 2.26 m (E2 0.30–0.58 m), D-S top-1 5.3 m (best of 8: 0.22 m), I-S = I-N 7.1 m, I@n0 8.8 m, ID-o 4.8 m, I-o 6.6 m (flagged `ill_posed`). N track: IDP-N with the LoS anchor 0.18 → ROI 0.00 m, identical to oracle and to S; uncorrected 2.05 m (ROI 1.9 m); DP-N 0.17/0.02 m with los vs 6.0 m uncorrected; ID-N los 0.10 m (kl_em 0.04 m) vs 0.15 m (kl_em 1.23 m) uncorrected; ID-N_sep 0.23 vs 6.0 m. LoS-anchor gauge error: τ ≤ 0.030 ns (complex) and 0.019 ns (power), φ max 24.4° (on a capture whose LoS is blocked). S_τ without phase correction: E1 unchanged (φ-invariant), but the shared-ρ ROI degrades to 0.40–0.48 m and Tikhonov to 0.31–1.42 m, while per-view MMV stays at 0.02–0.03 m.
+- **Full smoke suite** (default grid ±(10, 10, 6) m around the look-at point, bv + vs, every strategy): 802 rows, 627 ok, 175 n/a, 0 errors (T16's run had 24 DP-blind errors, now fixed); 2 h 11 min wall with 12 single-threaded workers, dominated by the eight `blind_tau_search` calls (DP/IDP × N/N-sep × bv/vs, 6 800–7 600 s each); P_W/IP_W E1 ≈ 690 s each; every other chain ≤ 100 s. The grid holds no BS and no BS image, so the only GT is one weak BV first-bounce point at (5, −2, 8): it is matched within 2 m only by the phase-only E1 maps (P-S, P-N, P_W, P×K-S, P-N_sep: tp 1/1 at 2 m, none at 1 m), which whiten away the LoS sidelobes that swamp every other map. Gauge strategies on this grid: LoS anchor τ ≤ 0.030 ns (complex) / 0.019 ns (power), φ ≤ 24.4° (blocked capture); blind 34–53 ns max (20–26 ns RMS); self_cal, VarPro and xcorr 260–320 ns max (they need scatterers in the grid, T34). `ill_posed` is always true for I-o and for ID-o-N without gauges, and true on a few VS rows whose top detections are sidelobes of the out-of-grid LoS (D-N and D-N_sep, DP-S_τ none, IDP-N blind, P_W): the flag depends on the evaluation points, which are the detections themselves.
+
+**Signals on the §5.4 hypotheses** (small scenes, R = 1; indicative only):
+
+1. *Sync invariance*: I-S and I-N rows are identical on every dataset (maps equal to ≤ 1e-12 in the tests); I@n0, P_W, IP_W run once by construction. Confirmed as a control.
+2. *Ranking*: on the micro scenes IDP-S ≈ DP-S ≈ D-S ≈ ID-S (E2) > P-S > I-S ≈ IP-S > I@n0 at 1 m, and on the mock LoS check IDP-S ≈ DP-S ≈ ID-S (≤ 0.2 m E1, ≤ 0.02 m after ROI/E2) ≫ IP-S > P-S > D-S (top-1) > I-S > I@n0. Broadly consistent with the predicted order; D-S ranks higher than predicted on isolated points (no association ghosts) and IP-S's ROI is unreliable on narrowband data.
+3. *Phase sync adds little under per-view amplitudes*: on the mock LoS, S_τ without φ correction keeps MMV per-view at S accuracy, while shared-amplitude solvers degrade (ROI 0.4–0.5 m) — the expected exception for a view-consistent isotropic source (the LoS is one).
+4. *P-N and IP-N ≈ I@n0 geometry*: not yet — P-N/IP-N E1 (2.3/1.3 m) are better than I@n0 (8.8 m) on the mock LoS, and similar at the 2 m gate on the micro scenes (1.0/0.8 vs 1.2 of 2).
+5. *N-LoS ≈ S with a visible LoS*: confirmed on the GPU mock (IDP-N/DP-N/ID-N with the LoS anchor match S and oracle to ≤ 0.1 m); without LoS (micro) the anchor fails, so the runner must gate it on `los_visible`. Blind D-N is not identifiable from the E1 splat without an N strategy (D-N none: 0/2 at 1 m).
+6. *F3 and joint vs stack*: not testable in Phase 1 (F-strategies are Phase 3).
+
+**Known limitations to carry into Phase 2.**
+
+- **ROI window definitions differ** between `bp.roi_grid` (24³, even) and `coherent.roi_grids_from_detections` (25³, centred); the ROI error (0.1–0.27 m) sits at the 4-view grating-lobe ambiguity and depends on the lattice, so unify only together with a lattice-independent refinement.
+- **MFISTA and power iteration are duplicated** in `solvers/power.py` (real, nonnegative, duck-typed operator) and `solvers/coherent.py` (complex `SeparableOperator`); a shared core is a refactor candidate.
+- **Omni E1 (I-o, ID-o) uses the raw adjoint** `power_backproject_grid` (no GLRT normalisation, no noise-floor subtraction, no tuning hyperparameters), i.e. the picket-fence bias that T11 removed for I/ID; omni rows localise poorly (micro 0/2 at 1 m, mock 4.8–6.6 m).
+- **`los_visible` is not used by the runner.** The `los` strategy fits a LoS on every capture (blocked captures give 12–24° phase errors on the mock, and scenes without LoS 19 ns), and gauge errors are not stratified by LoS visibility (§6.4). Phase 2 (T22's N-LoS check) needs the stratification and a skip/flag for LoS-free captures.
+- **Model fidelity for Sionna data**: operators use the scalar polarisation model (`"none"`) while Sionna traces V-pol (Phase 0: up to 2.7e-2 relative, mostly a common phase); `pattern`/`polarization` are not plumbed through the registry. The runner now refuses datasets whose `tx_pattern` is not `tr38901`.
+- **Cost reporting (M9)**: E2 rows record the iteration budget, not the iterations or A/Aᴴ counts actually performed (the solver results carry them). P_W/IP_W E1 costs one FFT volume per bin and capture (572 s for a 7³ grid on the mock); `blind_tau_search` takes 1.9–2.1 h per call single-threaded on the mock smoke grid (36–42 min with threaded BLAS, T16), which rules it out of the ≤ 10 min heavy smoke; the T12 power E2 misses the §4.1 2-min target on CPU (1.3–3.0 s per K+Kᵀ pair under load).
+- **Self-calibration and VarPro need the true or a fine support.** On the pruned 2 m support they do not converge (micro: 94–176°, 1.5–9.5 ns); coherent E2 on the 2 m support suffers basis mismatch. F3 stage B/C (T27b/c) are the fix.
+- **The §6.7 micro gates are weak.** On the 5×5×3 unit grid with points ≤ 0.2 m from voxel centres, IDP-N without any gauge correction also localises both points in 5/5 datasets; the larger smoke grid does expose the gauge (IDP-N none 1.0/2 vs S 2.0/2). A negative localisation control belongs in T22.
+- **Identifiability weights are placeholders** (Gaussian, per-capture amplitudes fitted from complex Y for every node) until T30; ID-N `los` reads a 4× delay-oversampled |c|² built from complex Y (fairness caveat, T14 deviation 2).
+- **Unit-test runtime is load-sensitive** (96 s idle, 21 min at load ~20 with default BLAS threads); CI runners should pin `OMP_NUM_THREADS`/`OPENBLAS_NUM_THREADS` or avoid oversubscription.
+- **Unchanged from the task notes**: observed-* tracks (T32); D E2, D-N strategies, narrowband LoS anchor, 1el E2, omni ellipsoid BP, E3 (`planned`); `fit_los_ground` assumes a flat ground at z = 0 and its `noise` key means the per-sample residual in complex mode but the NNLS constant in power mode.
 
 ### Phase 2: ground truth, dataset profile, heavy CI
 
