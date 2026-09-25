@@ -4,3 +4,6 @@ Viewer modules must not import ``sionna``, ``mitsuba``, ``drjit`` or ``matplotli
 module in this package must be listed in
 ``tests/test_rf_camera_boundaries.py::SIONNA_FREE_MODULES``.
 """
+
+# Version of the viewer (store metadata, API); bump on releases.
+VIEWER_VERSION = "0.1.0"
