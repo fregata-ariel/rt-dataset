@@ -33,6 +33,9 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.viewer.settings",
     "plateau_rt.viewer.extract",
     "plateau_rt.viewer.store",
+    "plateau_rt.viewer.derive",
+    "plateau_rt.viewer.safeio",
+    "plateau_rt.viewer.testing",
 ]
 
 

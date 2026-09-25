@@ -105,3 +105,91 @@ Versioning: `store_schema_version` (currently 1). `MIGRATIONS[v]` upgrades a sto
 each in one transaction, applied in order when a store is opened. A store newer than the viewer is
 refused with `StoreVersionError` ("created by viewer X or later") and left untouched. Changing the
 layout or a table requires a new migration and a version bump.
+
+## Derivers
+
+A **deriver** turns one member of a bundle into cached, named outputs (arrays, JSON, bytes) for a
+requested parameter combination. `plateau_rt.viewer.derive` holds the registry, validation and cache;
+`plateau_rt.viewer.testing` holds the determinism and golden helpers used by the test suite.
+
+### Declaring a deriver
+
+A deriver is any object with a `spec: DeriverSpec`, `param_space(ctx)` and `derive(ctx, params)`.
+`DeriverSpec(name, version, kinds, params, eager)` fixes the deriver name (`[a-z][a-z0-9_]{0,63}`),
+a `version >= 1`, the member `kinds` it supports (`rf_dataset`, `rf_partial`, `tomo_run`, `scene`)
+and its `params`. Each `ParamSpec(name, kind, ...)` is one of:
+
+| Kind | Validation | Role |
+|---|---|---|
+| `int` | `min`/`max` (ints) | range parameter, enumerated by callers |
+| `float` | `min`/`max`/`step` (step divides the range) | range parameter |
+| `enum` | non-empty unique `values` | space parameter |
+| `view` / `bs` / `member_link` | none | space parameter, values come from the bundle |
+
+**Range kinds** (`int`, `float`) are supplied by the request; **space kinds** (`enum`, `view`, `bs`,
+`member_link`) form the allowed combinations returned by `param_space(ctx)`. `view`, `bs` and
+`member_link` values are read from the bundle, so a request can only name views, base stations or
+members that actually exist. `validate_params` canonicalises every value (e.g. `"+05"` -> `"5"`,
+`"-3e1"` -> `"-30"`), rejects anything undeclared, missing, out of range or not in `param_space`, and
+raises `BadParams`. A `BadParams` raised inside `derive` (a data-dependent limit) is treated the same:
+nothing is written or recorded. An **eager** deriver has no range kinds and is enumerated from
+`param_space` alone by `derive_eager`.
+
+### Adding a deriver
+
+1. Put a module under `plateau_rt.viewer.derive` that constructs its deriver and calls `register()`
+   at import time (a private `_register` per module is fine).
+2. Add one line `"plateau_rt.viewer.derive.<module>"` to `DERIVER_MODULES` in that package.
+3. Record a golden with `pytest tests/test_viewer_golden.py --update-viewer-golden` and commit
+   `tests/viewer_golden/derivers.json`.
+4. **Bump `DeriverSpec.version` whenever an output's bytes can change** — including through shared
+   domain code the deriver calls. The golden test fails otherwise ("bump DeriverSpec.version").
+
+### Output rules
+
+`derive` returns a non-empty `Mapping[str, value]` of output file names to values:
+
+- `np.ndarray`: name ends in `.npy`; dtype must be one of `float16`, `float32`, `int32`, `uint8`,
+  `uint32`, `bool`. Written little-endian and C-contiguous. Complex dtypes are rejected (split into
+  magnitude and phase); object/structured/64-bit dtypes are rejected.
+- `dict` / `list`: name ends in `.json`; written as canonical JSON (`sort_keys`, compact separators,
+  UTF-8, no trailing newline). NaN becomes `null`; `inf` and non-string keys are rejected.
+- `bytes`: name must not end in `.npy` or `.json`; written verbatim.
+
+### Cache layout and keys
+
+```text
+bundles/<digest>/derived/<member>/<deriver>/v<version>/<params_key>/<links_key>/
+```
+
+`params_key` is `noparams` when there are no parameters, else the sorted `name=value` pairs joined
+with `,`, with values percent-encoded, capped at 200 characters (`BadParams` when longer). `links_key`
+is `nolink` when there are no links or all resolve to nothing; otherwise the link tokens joined with
+`_`. A same-bundle link contributes `self`, a missing link `none`, and a linked bundle its digest;
+overlong sequences become `links-<sha256>`. Every directory also holds `_meta.json` describing the
+request, links and output files.
+
+### Links and revalidation
+
+`ctx.link(LinkTarget(member=..., sha256=..., kind=...))` resolves a link and allows the linked
+bundle's raw root for the context's loaders. Resolution order: (1) a member id of the same bundle
+(filtered by `kind`); (2) a file sha256 matched in the store index, preferring the same bundle, then
+the earliest registered bundle, then digest/member/relpath; (3) otherwise no link. Before serving a
+cache entry, every recorded link target is re-resolved against the current store and the resulting
+`links_key` must still match, so deleting a linked bundle correctly falls back to the unlinked cache.
+Each cache hit is also checked for the presence and size of every output file.
+
+### The `derived` table
+
+Each attempt upserts a row keyed by `(digest, member, deriver, version, params_key, links_key)`:
+`status = ready` on success, `status = failed` with the `error` text when the deriver raises or
+returns invalid outputs (no directory is left behind). `updated_at` uses the store's UTC timestamp.
+
+### Safe loaders
+
+`plateau_rt.viewer.safeio` is the **only** viewer module allowed to call `np.load` or import
+`xml.etree` (enforced by an AST test). `resolve_inside(root, relpath)` rejects absolute paths, `..`
+segments, NUL bytes and symlinks that leave the root; every path written in stored data is resolved
+through it. The loaders check file sizes and declared array shapes before reading data, reject object
+dtypes and non-`npy`/`npz` members, and parse XML with DTDs, entities and external references
+forbidden.
