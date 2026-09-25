@@ -17,6 +17,12 @@ operator uses BLAS GEMMs only (no dense matrix), has an exact adjoint with
 respect to ``numpy.vdot`` and is exposed as a
 :class:`scipy.sparse.linalg.LinearOperator`.
 
+The operator may be restricted to a subset of frequency bins via the
+keyword-only ``bins`` parameter of :class:`SeparableOperator` (``None`` keeps
+today's full-band behaviour exactly). Note that
+``gauges.varpro_cost_and_grad`` / ``gauges.self_calibrate`` expect a
+full-band operator.
+
 This is the ``wavefront="plane"`` carrier-only model of
 ``forward_exact.atom_cfr`` (``squint=False``); the spherical-wavefront and
 squint mismatch sweeps use ``forward_exact``. NumPy/SciPy only: nothing here may
@@ -27,6 +33,7 @@ frequencies hertz.
 from __future__ import annotations
 
 import copy
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -118,8 +125,29 @@ def _validate_gauges(
     return phi, tau
 
 
+def _validate_bins(
+    bins: Sequence[int] | np.ndarray | None, num_bins: int
+) -> tuple[int, ...] | None:
+    """Return ``bins`` as a tuple of distinct bin indices, or None."""
+    if bins is None:
+        return None
+    arr = np.asarray(bins)
+    if arr.ndim != 1 or arr.size == 0 or arr.dtype.kind not in "iu":
+        raise ValueError("bins must be distinct integers in [0, num_bins)")
+    if np.any(arr < 0) or np.any(arr >= int(num_bins)):
+        raise ValueError("bins must be distinct integers in [0, num_bins)")
+    if np.unique(arr).size != arr.size:
+        raise ValueError("bins must be distinct integers in [0, num_bins)")
+    return tuple(int(b) for b in arr)
+
+
 class SeparableOperator:
-    """Exact separable plane-wave operator ``A_ang diag(gamma * beta) D^T``."""
+    """Exact separable plane-wave operator ``A_ang diag(gamma * beta) D^T``.
+
+    With ``bins`` given, only those frequency bins are modelled: ``y_shape``
+    becomes ``[V, B, 2, R, C, len(bins)]`` and ``freq_offsets`` the selected
+    offsets. ``bins=None`` keeps the full-band behaviour exactly.
+    """
 
     def __init__(
         self,
@@ -132,12 +160,14 @@ class SeparableOperator:
         pattern: str = "tr38901",
         polarization: str = "none",
         cache: bool | None = None,
+        bins: Sequence[int] | np.ndarray | None = None,
     ) -> None:
         if beta_model not in BETA_MODELS:
             raise ValueError(f"beta_model must be one of {BETA_MODELS}, got {beta_model!r}")
         if beta_model == "constrained" and space == "bv":
             raise ValueError("beta_model='constrained' is only defined in 'vs' space")
 
+        validated_bins = _validate_bins(bins, geom.num_bins)
         self._geom = geom
         self._space = space
         self._beta_model = beta_model
@@ -146,10 +176,17 @@ class SeparableOperator:
         self._num_views = geom.num_views
         self._num_bs = geom.num_bs
         self._num_elements = geom.num_elements
-        self._num_bins = geom.num_bins
+        self._bins = validated_bins
+        if validated_bins is None:
+            self._num_bins = geom.num_bins
+            self._df = geom.freq_offsets
+        else:
+            self._num_bins = len(validated_bins)
+            selected = np.asarray(geom.freq_offsets, dtype=np.float64)[list(validated_bins)]
+            selected.setflags(write=False)
+            self._df = selected
         self._rows, self._cols = geom.aperture_shape
         self._q = geom.elem_offsets
-        self._df = geom.freq_offsets
         self._k = geom.wavenumber
         self._num_points = _prepare_points(points).shape[0]
 
@@ -259,6 +296,16 @@ class SeparableOperator:
     def cached(self) -> bool:
         """True when the per-capture ``A`` and ``D`` are stored."""
         return self._cached
+
+    @property
+    def bins(self) -> tuple[int, ...] | None:
+        """Selected frequency bins in the given order, or None for full band."""
+        return self._bins
+
+    @property
+    def freq_offsets(self) -> np.ndarray:
+        """Selected frequency offsets (read-only float64 array)."""
+        return self._df
 
     def _steering(self, capture: _Capture) -> np.ndarray:
         """Return ``exp(+1j k q_m . u_p)`` as ``[M, P]`` (permuted order)."""

@@ -586,3 +586,107 @@ def test_benchmark_separable_operator() -> None:
         assert back.shape == (count,)
         assert np.all(np.isfinite(image))
         assert np.all(np.isfinite(back))
+
+
+def _bins_cases(num_bins: int) -> list[tuple[int, ...]]:
+    """Return the bin subsets of the brief: DC, strided and first bin."""
+    return [(num_bins // 2,), (1, 5, 6), (0,)]
+
+
+def test_bins_forward_matches_full_band_subset() -> None:
+    rng = np.random.default_rng(1001)
+    geom = _synthetic_geometry()
+    points = _point_cloud(geom, rng)
+    views, bss = geom.num_views, geom.num_bs
+    gauges = (
+        rng.uniform(0.0, 2.0 * np.pi, size=(views, bss)),
+        rng.normal(scale=1e-8, size=(views, bss)),
+    )
+    for model, space in (
+        ("shared", "vs"),
+        ("shared", "bv"),
+        ("per_view", "bv"),
+        ("constrained", "vs"),
+    ):
+        for active_gauges in (None, gauges):
+            full = SeparableOperator(points, geom, space, beta_model=model, gauges=active_gauges)
+            x = _complex(rng, full.x_shape)
+            reference = full.forward(x)
+            for bins in _bins_cases(geom.num_bins):
+                sub = SeparableOperator(
+                    points, geom, space, beta_model=model, gauges=active_gauges, bins=bins
+                )
+                assert sub.bins == tuple(bins)
+                assert sub.y_shape == reference.shape[:-1] + (len(bins),)
+                np.testing.assert_array_equal(sub.freq_offsets, geom.freq_offsets[list(bins)])
+                assert _max_relative_error(sub.forward(x), reference[..., list(bins)]) <= 1e-12
+
+
+def test_bins_adjoint() -> None:
+    rng = np.random.default_rng(1002)
+    geom = _synthetic_geometry()
+    points = _point_cloud(geom, rng)
+    views, bss = geom.num_views, geom.num_bs
+    gauges = (
+        rng.uniform(0.0, 2.0 * np.pi, size=(views, bss)),
+        rng.normal(scale=1e-8, size=(views, bss)),
+    )
+    for model, space in (
+        ("shared", "vs"),
+        ("shared", "bv"),
+        ("per_view", "bv"),
+        ("constrained", "vs"),
+    ):
+        for active_gauges in (None, gauges):
+            for bins in _bins_cases(geom.num_bins):
+                operator = SeparableOperator(
+                    points, geom, space, beta_model=model, gauges=active_gauges, bins=bins
+                )
+                x = _complex(rng, operator.x_shape)
+                y = _complex(rng, operator.y_shape)
+                forward = operator.forward(x)
+                left = np.vdot(y, forward)
+                right = np.vdot(operator.adjoint(y), x)
+                assert abs(left - right) <= 1e-10 * abs(left)
+
+
+def test_bins_with_gauges_keeps_bins() -> None:
+    rng = np.random.default_rng(1003)
+    geom = _synthetic_geometry()
+    points = _point_cloud(geom, rng)
+    views, bss = geom.num_views, geom.num_bs
+    gauges = (
+        rng.uniform(0.0, 2.0 * np.pi, size=(views, bss)),
+        rng.normal(scale=1e-8, size=(views, bss)),
+    )
+    for model, space in (("shared", "bv"), ("per_view", "bv"), ("constrained", "vs")):
+        for bins in _bins_cases(geom.num_bins):
+            operator = SeparableOperator(points, geom, space, beta_model=model, bins=bins)
+            x = _complex(rng, operator.x_shape)
+            gauged = operator.with_gauges(gauges)
+            assert gauged.bins == operator.bins == tuple(bins)
+            fresh = SeparableOperator(
+                points, geom, space, beta_model=model, gauges=gauges, bins=bins
+            )
+            assert _max_relative_error(gauged.forward(x), fresh.forward(x)) <= 1e-15
+
+
+def test_bins_invalid() -> None:
+    geom = _synthetic_geometry()
+    points = np.array([[3.0, -2.0, 4.0]])
+    num_bins = geom.num_bins
+    for bad in ([], [num_bins], [-1], [2, 2], [[0, 1]], [0.5], [True]):
+        with pytest.raises(ValueError):
+            SeparableOperator(points, geom, "vs", bins=bad)
+
+
+def test_bins_none_is_default() -> None:
+    rng = np.random.default_rng(1004)
+    geom = _synthetic_geometry()
+    points = _point_cloud(geom, rng)
+    operator = SeparableOperator(points, geom, "bv", beta_model="per_view")
+    explicit = SeparableOperator(points, geom, "bv", beta_model="per_view", bins=None)
+    assert operator.bins is None
+    assert explicit.bins is None
+    x = _complex(rng, operator.x_shape)
+    np.testing.assert_array_equal(explicit.forward(x), operator.forward(x))
