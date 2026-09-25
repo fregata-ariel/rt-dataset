@@ -18,6 +18,7 @@ ERROR_TYPES = (
     "not_found",
     "bad_params",
     "derive_failed",
+    "conflict",
 )
 
 

@@ -84,7 +84,7 @@ tomography runs to their source dataset.
 | `error` | error text (NULL on success) |
 | `updated_at` | last update time, UTC ISO 8601 |
 
-`jobs`: background job records (used by V0-5b (#40) and V1-10 (#56)).
+`jobs`: background job records (written by `plateau_rt.viewer.jobs`; see "Jobs").
 
 | Column | Meaning |
 |---|---|
@@ -231,15 +231,59 @@ opened outside the bundle root; unsafe XML `filename` values are errors, not ope
 
 ```bash
 uv sync --group viewer
+python -m plateau_rt.viewer serve --host 127.0.0.1 --port 8765 --data /path/to/store
+```
+
+Run a **single worker**. Job state and request deduplication live inside the server process:
+a second worker would run duplicate jobs and each worker would only see its own job status. For
+that reason `serve` has no `--workers` option and the equivalent uvicorn form is pinned to one
+worker:
+
+```bash
 VIEWER_DATA=/path/to/store uv run uvicorn --factory plateau_rt.viewer.api:create_app_from_env \
   --host 127.0.0.1 --port 8765 --workers 1
 ```
 
-Run a **single worker**: background job state (added with the upload hook in V0-5b, #40) lives in
-the process and is not shared between workers. Bind to `127.0.0.1` by default and expose the
-viewer only behind a TLS reverse proxy (V0-D1, #27). A `python -m plateau_rt.viewer serve` command
-and a compose service arrive with V0-5b (#40) and V0-7 (#42); until then `uvicorn --factory` is the
-supported entry point.
+Bind to `127.0.0.1` by default and expose the viewer only behind a TLS reverse proxy (V0-D1, #27).
+`python -m plateau_rt.viewer` also provides the `ingest` and `derive` commands (see "Command line").
+
+## Jobs
+
+A derivation is never computed inside a request when it is missing from the cache: the derive
+route answers 202 and queues an in-process job. `plateau_rt.viewer.jobs.JobManager` runs each job
+in a `spawn` child process so a crashing or memory-hungry deriver cannot take the server down.
+
+- **Child process.** One `multiprocessing` `spawn` child per derivation. The child re-registers
+  the deriver (the object is pickled to it) and calls `get_or_derive`, so the normal cache and
+  `derived`-table behaviour applies.
+- **Memory.** The child sets `RLIMIT_AS` to `VIEWER_DERIVE_MEM_BYTES`. The limit covers the whole
+  child address space, including the interpreter and NumPy (about 0.7 GiB before any derivation
+  data), so it must be set above that floor. A `MemoryError` anywhere in the exception chain is
+  reported as `memory_limit`.
+- **Timeout.** `VIEWER_DERIVE_TIMEOUT_S` starts when the child is started and therefore includes
+  child start-up. A timeout kills the child and fails the job with `timeout`.
+- **Concurrency.** `VIEWER_MAX_CONCURRENT_DERIVES` worker threads run one child each. Eager and
+  lazy jobs share the same workers; a lazy job that arrives while eager jobs are pending is
+  promoted ahead of them (the queue is lazy-first, FIFO within each priority).
+- **Dedup.** Jobs are deduplicated by `(bundle digest, member, deriver, params_key)`. Running the
+  same request again returns the active job instead of starting a second one.
+- **Statuses and stages.** A job is `queued`, `running`, `done` or `failed`; its `stage` moves
+  through `queued`, `starting`, `deriving` and `done`. The `error` column stores
+  `"<reason>: <message>"`; `reason` is one of `timeout`, `memory_limit`, `restart`, `error` or
+  `crashed` (a child that died without a final message).
+- **Sticky failures.** A failed job is not retried by a plain GET: the failure is returned
+  unchanged until the client calls the retry route. This keeps a broken deriver from being
+  re-run on every page load. A `restart` failure is not sticky: the next GET queues a new job.
+  The CLI `derive` command always re-runs failed derivations.
+- **Restart recovery.** At startup every `queued` or `running` row is marked failed with reason
+  `restart`, and a missing eager derivation is queued again for every stored bundle, so a
+  derivation interrupted by a restart is recomputed.
+- **Cancel on delete.** Deleting a bundle cancels its active jobs and waits briefly for the
+  running children to stop before removing the files.
+- **`jobs` table.** Each job is one row keyed by `job_id`, with `kind` (`eager`/`lazy`), the
+  bundle `digest`, `member`, `deriver`, `params_key`, `status`, `stage`, `error`, `created_at`
+  and `updated_at`. `done_bytes`/`total_bytes` are reserved for progress reporting.
+
 
 ## Configuration
 
@@ -255,9 +299,9 @@ to its variable. Byte sizes accept a decimal number with an optional binary suff
 | `VIEWER_MAX_FILES` | `100000` | Maximum entries extracted from one archive. |
 | `VIEWER_MAX_ARRAY_BYTES` | `1 GiB` | Largest `.npy`/`.npz` array accepted by validation and derivers. |
 | `VIEWER_IMPORT_ROOTS` | empty | `os.pathsep`-separated absolute directories allowed for directory imports. |
-| `VIEWER_DERIVE_TIMEOUT_S` | `120` | Derivation timeout (used by background jobs). |
-| `VIEWER_DERIVE_MEM_BYTES` | `4 GiB` | Per-derivation memory budget (used by background jobs). |
-| `VIEWER_MAX_CONCURRENT_DERIVES` | `2` | Concurrent derivation limit (used by background jobs). |
+| `VIEWER_DERIVE_TIMEOUT_S` | `120` | Per-derivation timeout, including child start-up. |
+| `VIEWER_DERIVE_MEM_BYTES` | `4 GiB` | Per-derivation `RLIMIT_AS` for the child address space. |
+| `VIEWER_MAX_CONCURRENT_DERIVES` | `2` | Worker threads shared by eager and lazy jobs (lazy first). |
 | `VIEWER_ALLOWED_HOSTS` | `127.0.0.1,localhost` | `Host` allow-list (enforced by V0-9, #44). |
 | `VIEWER_READ_ONLY` | `false` | Reported by `/api/health`; rejecting mutating operations is V1-12 (#59). |
 
@@ -274,7 +318,10 @@ All routes are under `/api` except the static hook. Errors always use the envelo
 | `GET` | `/api/bundles/{digest}` | 200 | Summary plus `error`, `validated_with`, `derived` rows. |
 | `DELETE` | `/api/bundles/{digest}` | 200 | `{"confirm": "<digest>"}` body; `digest`, `deleted`. |
 | `GET` | `/api/bundles/{digest}/members/{member}/raw/{path}` | 200 | File bytes with the download security headers. |
-| `GET` | `/api/bundles/{digest}/members/{member}/derived/{deriver}` | 200 | Runs (or reuses) a derivation; JSON metadata and file URLs. |
+| `GET` | `/api/bundles/{digest}/members/{member}/derived/{deriver}` | 200 / 202 | Reuses a cached derivation (200) or queues a job (202 `job_id`, `status_url`, `status`). |
+| `POST` | `/api/bundles/{digest}/members/{member}/derived/{deriver}/retry` | 202 | Re-queues a failed derivation; 409 when it is ready or not failed. |
+| `GET` | `/api/jobs/{job_id}` | 200 | One job row plus `status_url` and (when `done`) `result`. |
+| `GET` | `/api/bundles/{digest}/status` | 200 | `digest`, `complete`, `eager` counts, `items` and `failures`. |
 | `GET` | `.../derived/{deriver}/v{version}/{params_key}/{links_key}/{name}` | 200 / 304 | One derived file with `ETag`, immutable cache, conditional `If-None-Match`. |
 | `GET` | `/` | 200 | `index.html` when a frontend is installed, else a plain-text pointer. |
 | `GET` | `/static/...` | 200 | Mounted only when the static directory exists. |
@@ -290,8 +337,9 @@ immediately with 413, and a free space below `VIEWER_MAX_EXTRACTED_BYTES` answer
 reading. The archive is extracted with `safe_extract`, validated, and committed; `created` is
 `true` (201) for a new digest and `false` (200) for a duplicate. Every failure path removes the
 staging file and staging directory, so a rejected upload leaves no trace. A successful commit of a
-new bundle calls the `on_bundle_committed(store, digest)` hook once (V0-5b, #40 starts eager
-derivations there); duplicates and failures do not.
+new bundle calls the `on_bundle_committed(store, digest)` hook once in the threadpool; the hook
+queues the bundle's missing eager derivations and never fails the upload. Duplicates and failures
+do not call it.
 
 Raw serving. A member's raw directory is the `scene` XML's directory for `scene` members and the
 member path for every other kind; the requested `path` is **relative to that member directory**, so
@@ -309,9 +357,15 @@ index and the file is listed in the cache directory's `_meta.json` with a matchi
 `_meta.json` itself and any other name answer 404). The `ETag` is `"<sha256>"` from `_meta.json`,
 the response is `Cache-Control: public, max-age=31536000, immutable`, and `If-None-Match`
 (including `W/` prefixes and `*`) answers 304 without a body. Path segments of the URL are
-percent-encoded (keeping `=` and `,`), so a `%` inside a `params_key` travels as `%25`. The info
-route derives synchronously inside the request for now; V0-5b (#40) replaces a cache miss with 202
-and a background job.
+percent-encoded (keeping `=` and `,`), so a `%` inside a `params_key` travels as `%25`.
+
+Idempotent GET. The derive route reuses a cached derivation and answers 200. On a cache miss it
+queues a lazy job and answers 202 with `job_id`, `status_url` and the initial `status`; the client
+polls `GET /api/jobs/{job_id}` and reads the ready body from the job's `result` (or re-requests the
+route). A failed derivation is sticky: the same GET returns the failed job rather than running it
+again, and the client must `POST .../retry` to try once more. `GET /api/bundles/{digest}/status`
+reports which eager derivations are `done` (cache ready), `queued`, `running`, `failed` or
+`missing`, and lists every failed job of the bundle that does not have a ready cache.
 
 Error envelope. Every error response contains exactly
 `{"error": {"type": <type>, "member": <id or null>, "message": <text>}}` and
@@ -328,6 +382,7 @@ included).
 | `not_found` | 404 | Unknown digest, member, deriver, file or ready derivation. |
 | `bad_params` | 400 | Invalid query/name/confirm/Content-Type or `derive.BadParams`. |
 | `derive_failed` | 500 | `derive.DeriveError` from a failing or invalid derivation. |
+| `conflict` | 409 | Retry of a derivation that is already ready or has not failed. |
 
 ## Architecture
 
@@ -340,14 +395,40 @@ included).
 | `plateau_rt.viewer.kinds` | Kind detection and member validation. |
 | `plateau_rt.viewer.ingest` | HTTP-free `ingest_staged`/`ingest_archive` used by the API and later CLIs. |
 | `plateau_rt.viewer.derive` | Deriver registry, parameter validation and versioned cache. |
-| `plateau_rt.viewer.api` | FastAPI app factory, error envelope, bundle and derived routes. |
+| `plateau_rt.viewer.jobs` | Background job manager (`spawn` children, limits, dedup, recovery). |
+| `plateau_rt.viewer.__main__` | Headless `serve`/`ingest`/`derive` command line. |
+| `plateau_rt.viewer.api` | FastAPI app factory, error envelope, bundle, derived and job routes. |
 | `plateau_rt.viewer.static` | Frontend assets (V0-6, #41); absent until then. |
 | `plateau_rt.viewer.testing` | Determinism and golden helpers for tests. |
 
 Data flow: upload (`PUT /api/bundles/upload`) -> streamed into `staging/<uuid>.upload` ->
 `safe_extract` into a staging directory -> `detect_members`/`validate_member` -> `Store.commit`
-(content digest, read-only `raw/`, index rows) -> `on_bundle_committed` hook -> derivations run on
-request (`GET .../derived/...`) and are cached under `bundles/<digest>/derived/...`.
+(content digest, read-only `raw/`, index rows) -> `on_bundle_committed` hook -> the job manager
+queues every missing eager derivation. A derive request on a cache miss queues a lazy job (or
+promotes an already queued one); each job runs `get_or_derive` in a limited `spawn` child and
+caches the outputs under `bundles/<digest>/derived/...`.
+
+## Command line
+
+`python -m plateau_rt.viewer` is the headless entry point (it is not routed through
+`plateau_rt.cli.main`). Every command accepts `--data DIR`. `ingest` and `derive` print exactly one
+JSON object to stdout with `indent=2` and sorted keys (the heavy CI parses it); diagnostics never
+go to stdout. `serve` logs through uvicorn.
+
+| Command | Behaviour |
+|---|---|
+| `serve [--host 127.0.0.1] [--port 8765] [--data DIR]` | Runs the uvicorn backend with exactly one worker (see "Running the backend"). |
+| `ingest PATH [--name NAME] [--data DIR]` | Ingests a directory or archive; `--name` defaults to the path basename. Does not run derivations. |
+| `derive DIGEST [--all-lazy] [--data DIR]` | Runs the eager derivations and, with `--all-lazy`, the lazy ones. |
+
+`ingest` prints `{"digest", "created", "members"}` and exits 0, or
+`{"error": {"type", "member", "message"}}` and exits 1 with type `unsafe_archive`, `unknown_kind`,
+`validation`, `not_found` (missing path) or `error`. `derive` prints
+`{"digest", "results", "failed"}` with one result per combination (`member`, `deriver`, `params`,
+`params_key`, `status`, `cached`, `job_id`, `reason`, `error`) and exits 1 when any result failed or
+the digest is unknown; it exits 0 when the only non-`done` results are skipped. A deriver with a
+**range** parameter (`int`/`float`) cannot be enumerated, so `--all-lazy` reports it as `skipped`
+rather than deriving it. Without `--all-lazy`, lazy derivers are not enumerated at all.
 
 ## Adding a slice (backend)
 

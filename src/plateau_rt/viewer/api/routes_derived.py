@@ -7,7 +7,7 @@ import urllib.parse
 from typing import Any
 
 from fastapi import APIRouter, Request
-from starlette.responses import FileResponse, Response
+from starlette.responses import FileResponse, JSONResponse, Response
 
 from plateau_rt.viewer import safeio
 from plateau_rt.viewer.api.errors import ApiError
@@ -20,9 +20,9 @@ from plateau_rt.viewer.derive import (
     DeriveNotFound,
     Deriver,
     get_deriver,
-    get_or_derive,
     registered_derivers,
 )
+from plateau_rt.viewer.jobs import Prepared, lookup_cached, prepare
 from plateau_rt.viewer.safeio import UnsafePathError
 from plateau_rt.viewer.store import Store
 
@@ -75,7 +75,7 @@ def _deriver_record(deriver: Deriver) -> dict[str, Any]:
     }
 
 
-def _derived_payload(digest: str, result: DerivedResult) -> dict[str, Any]:
+def derived_payload(digest: str, result: DerivedResult) -> dict[str, Any]:
     """Return the JSON body describing one derivation result."""
     return {
         "deriver": result.deriver,
@@ -133,9 +133,8 @@ def list_derivers() -> dict[str, Any]:
     return {"derivers": [_deriver_record(deriver) for deriver in registered_derivers()]}
 
 
-@router.get("/bundles/{digest}/members/{member}/derived/{deriver}")
-def derive_member(digest: str, member: str, deriver: str, request: Request) -> dict[str, Any]:
-    """Return the cached or freshly derived outputs of one deriver run."""
+def _prepare_request(request: Request, digest: str, member: str, deriver: str) -> Prepared:
+    """Parse the query parameters and prepare a derivation request."""
     store: Store = request.app.state.store
     record = require_record(store, digest)
     require_member(record, member)
@@ -145,14 +144,70 @@ def derive_member(digest: str, member: str, deriver: str, request: Request) -> d
             raise ApiError(400, "bad_params", f"repeated parameter {key!r}", member)
         params[key] = value
     try:
-        result = get_or_derive(store, record.digest, member, deriver, params)
+        return prepare(store, record.digest, member, deriver, params)
     except DeriveNotFound as exc:
         raise ApiError(404, "not_found", str(exc), member) from exc
     except BadParams as exc:
         raise ApiError(400, "bad_params", str(exc), member) from exc
     except DeriveError as exc:
         raise ApiError(500, "derive_failed", str(exc), member) from exc
-    return _derived_payload(record.digest, result)
+
+
+def _accepted(job: Any) -> JSONResponse:
+    """Return the 202 body of a queued derivation job."""
+    return JSONResponse(
+        {
+            "job_id": job.job_id,
+            "status_url": f"/api/jobs/{job.job_id}",
+            "status": job.status,
+        },
+        status_code=202,
+    )
+
+
+@router.get("/bundles/{digest}/members/{member}/derived/{deriver}", response_model=None)
+def derive_member(
+    digest: str, member: str, deriver: str, request: Request
+) -> dict[str, Any] | JSONResponse:
+    """Return the cached outputs or queue a background derivation (202)."""
+    store: Store = request.app.state.store
+    prepared = _prepare_request(request, digest, member, deriver)
+    cached = lookup_cached(store, prepared)
+    if cached is not None:
+        return derived_payload(prepared.digest, cached)
+    job = request.app.state.jobs.submit(prepared, kind="lazy")
+    return _accepted(job)
+
+
+@router.post("/bundles/{digest}/members/{member}/derived/{deriver}/retry")
+def retry_member(digest: str, member: str, deriver: str, request: Request) -> JSONResponse:
+    """Re-queue a failed derivation; 409 when it is ready or not failed."""
+    store: Store = request.app.state.store
+    prepared = _prepare_request(request, digest, member, deriver)
+    if lookup_cached(store, prepared) is not None:
+        raise ApiError(409, "conflict", "derivation is already ready", member)
+    jobs = request.app.state.jobs
+    latest = jobs.latest(prepared.digest, member, prepared.deriver.spec.name, prepared.params_key)
+    failed = latest is not None and latest.status == "failed"
+    if latest is None:
+        with store.connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM derived WHERE digest = ? AND member = ? AND deriver = ? "
+                "AND version = ? AND params_key = ? AND status = 'failed' LIMIT 1",
+                (
+                    prepared.digest,
+                    member,
+                    prepared.deriver.spec.name,
+                    prepared.deriver.spec.version,
+                    prepared.params_key,
+                ),
+            ).fetchone()
+        failed = row is not None
+    if not failed:
+        status = latest.status if latest is not None else "none"
+        raise ApiError(409, "conflict", f"derivation is not failed (status {status})", member)
+    job = jobs.submit(prepared, kind="lazy", force=True)
+    return _accepted(job)
 
 
 @router.get(

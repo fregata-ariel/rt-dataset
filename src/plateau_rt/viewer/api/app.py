@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
@@ -13,15 +15,21 @@ from plateau_rt.viewer import VIEWER_VERSION
 from plateau_rt.viewer.api.errors import install_error_handlers
 from plateau_rt.viewer.api.routes_bundles import router as bundles_router
 from plateau_rt.viewer.api.routes_derived import router as derived_router
+from plateau_rt.viewer.api.routes_jobs import router as jobs_router
+from plateau_rt.viewer.jobs import JobManager
 from plateau_rt.viewer.settings import ViewerSettings
 from plateau_rt.viewer.store import Store
 
 DEFAULT_STATIC_DIR = Path(__file__).resolve().parents[1] / "static"
 
 
-def start_eager_derivations(store: Store, digest: str) -> None:
-    """Hook called after a new bundle is committed; V0-5b (#40) starts eager derivations here."""
-    return None
+def eager_hook(jobs: JobManager) -> Callable[[Store, str], None]:
+    """Return the bundle-committed hook that queues a bundle's missing eager derivations."""
+
+    def _hook(store: Store, digest: str) -> None:
+        jobs.submit_eager(digest)
+
+    return _hook
 
 
 def _index_response(directory: Path) -> Response:
@@ -37,20 +45,31 @@ def _index_response(directory: Path) -> Response:
 
 def create_app(settings: ViewerSettings, *, static_dir: Path | None = None) -> FastAPI:
     """Build the viewer FastAPI app, opening the store from ``settings`` once."""
+    store = Store(settings)
+    jobs = JobManager(store)
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Shut the job manager down after the server stops."""
+        yield
+        jobs.shutdown()
+
     app = FastAPI(
         title="plateau_rt viewer",
         version=VIEWER_VERSION,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
+        lifespan=lifespan,
     )
-    store = Store(settings)
     app.state.settings = settings
     app.state.store = store
-    app.state.on_bundle_committed = start_eager_derivations
+    app.state.jobs = jobs
+    app.state.on_bundle_committed = eager_hook(jobs)
     install_error_handlers(app)
     app.include_router(bundles_router, prefix="/api")
     app.include_router(derived_router, prefix="/api")
+    app.include_router(jobs_router, prefix="/api")
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
@@ -71,6 +90,7 @@ def create_app(settings: ViewerSettings, *, static_dir: Path | None = None) -> F
 
     if directory.is_dir():
         app.mount("/static", StaticFiles(directory=directory), name="static")
+    jobs.recover()
     return app
 
 

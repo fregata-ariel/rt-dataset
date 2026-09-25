@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import json
+import logging
 import os
 import posixpath
 import re
@@ -28,6 +29,8 @@ from plateau_rt.viewer.settings import ViewerSettings
 from plateau_rt.viewer.store import BundleRecord, Store
 
 router = APIRouter()
+
+_LOGGER = logging.getLogger(__name__)
 
 DELETE_BODY_LIMIT = 4096
 _QUERY_NAME_RE = re.compile(r".{1,200}\Z", re.DOTALL)
@@ -139,7 +142,10 @@ async def upload_bundle(request: Request) -> JSONResponse:
         await _read_upload(request, settings, upload_path)
         result = await run_in_threadpool(ingest_archive, store, upload_path, name=name)
         if result.created:
-            request.app.state.on_bundle_committed(store, result.digest)
+            try:
+                await run_in_threadpool(request.app.state.on_bundle_committed, store, result.digest)
+            except Exception:
+                _LOGGER.exception("on_bundle_committed hook failed for %s", result.digest)
         return JSONResponse(
             {
                 "digest": result.digest,
@@ -216,6 +222,9 @@ async def delete_bundle(digest: str, request: Request) -> dict[str, Any]:
         raise ApiError(400, "bad_params", "confirmation must equal the bundle digest") from exc
     if not isinstance(payload, dict) or payload.get("confirm") != record.digest:
         raise ApiError(400, "bad_params", "confirmation must equal the bundle digest")
+    jobs = getattr(request.app.state, "jobs", None)
+    if jobs is not None:
+        await run_in_threadpool(jobs.cancel_bundle, record.digest)
     store.delete(record.digest)
     return {"digest": record.digest, "deleted": True}
 

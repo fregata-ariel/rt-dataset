@@ -45,6 +45,9 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.viewer.api.errors",
     "plateau_rt.viewer.api.routes_bundles",
     "plateau_rt.viewer.api.routes_derived",
+    "plateau_rt.viewer.jobs",
+    "plateau_rt.viewer.__main__",
+    "plateau_rt.viewer.api.routes_jobs",
 ]
 
 

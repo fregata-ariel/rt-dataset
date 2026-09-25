@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import urllib.parse
 import warnings
 from collections.abc import Callable, Sequence
@@ -26,13 +27,12 @@ from viewer_bundle_fixtures import (
     write_broken_dataset,
     write_fixture_bundle,
 )
+from viewer_job_derivers import Boom, Versioned
 
 from plateau_rt.application.rf_dataset_manifest import ManifestError
 from plateau_rt.viewer import VIEWER_VERSION
 from plateau_rt.viewer.api import create_app
 from plateau_rt.viewer.derive import (
-    DeriverSpec,
-    ParamSpec,
     register,
     registered,
     unregister,
@@ -93,8 +93,10 @@ def _settings(tmp_path: Path, **overrides: Any) -> ViewerSettings:
 
 
 def make_app(tmp_path: Path, **overrides: Any) -> Any:
-    """Build an app with no static directory and stats about no host free space."""
-    return create_app(_settings(tmp_path, **overrides), static_dir=tmp_path / "nostatic")
+    """Build an app with no static directory and the eager hook disabled."""
+    app = create_app(_settings(tmp_path, **overrides), static_dir=tmp_path / "nostatic")
+    app.state.on_bundle_committed = lambda store, digest: None
+    return app
 
 
 def make_client(tmp_path: Path, **overrides: Any) -> tuple[Any, TestClient]:
@@ -106,6 +108,28 @@ def make_client(tmp_path: Path, **overrides: Any) -> tuple[Any, TestClient]:
 def upload(client: TestClient, data: bytes, name: str = "fixture") -> Any:
     """PUT an archive body as an octet-stream upload."""
     return client.put(f"/api/bundles/upload?name={name}", content=data, headers=OCTET)
+
+
+def poll_job(client: TestClient, job_id: str, timeout: float = 60) -> dict[str, Any]:
+    """Poll one derivation job until it is terminal and return its JSON body."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        body = client.get(f"/api/jobs/{job_id}").json()
+        if body["status"] in ("done", "failed"):
+            return body
+        time.sleep(0.05)
+    raise AssertionError(f"job {job_id} did not finish within {timeout} s")
+
+
+def derive_ready(client: TestClient, url: str, params: Any = None) -> dict[str, Any]:
+    """GET a derivation, polling its job on 202, and return the ready 200 body."""
+    response = client.get(url, params=params)
+    if response.status_code == 202:
+        info = poll_job(client, response.json()["job_id"])
+        assert info["status"] == "done", info
+        response = client.get(url, params=params)
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
 def assert_clean(store: Store) -> None:
@@ -231,14 +255,19 @@ def test_upload_list_and_overview(
     assert detail["error"] is None
     assert detail["derived"] == []
 
-    info = client.get(f"/api/bundles/{digest}/members/dataset/derived/overview")
-    assert info.status_code == 200
-    info_body = info.json()
+    accepted = client.get(f"/api/bundles/{digest}/members/dataset/derived/overview")
+    assert accepted.status_code == 202
+    job = poll_job(client, accepted.json()["job_id"])
+    assert job["status"] == "done"
+    info_body = client.get(f"/api/bundles/{digest}/members/dataset/derived/overview").json()
+    assert info_body["cached"] is True
+    assert {key: value for key, value in job["result"].items() if key != "cached"} == {
+        key: value for key, value in info_body.items() if key != "cached"
+    }
     assert info_body["deriver"] == "overview"
     assert info_body["member"] == "dataset"
     assert info_body["version"] == 1
     assert info_body["params_key"] == "noparams"
-    assert info_body["cached"] is False
     assert [item["name"] for item in info_body["files"]] == ["overview.json"]
     file_url = info_body["files"][0]["url"]
     file_response = client.get(file_url)
@@ -270,6 +299,7 @@ def test_upload_list_and_overview(
     info2 = client.get(f"/api/bundles/{digest}/members/dataset/derived/overview").json()
     assert info2["cached"] is True
     assert info2["files"] == info_body["files"]
+    _app.state.jobs.shutdown()
 
 
 def test_hook_called_once_for_new_bundle(tmp_path: Path, zip_bytes: bytes) -> None:
@@ -607,7 +637,7 @@ def test_derived_file_etag(tmp_path: Path, zip_bytes: bytes) -> None:
     app, client = make_client(tmp_path)
     store: Store = app.state.store
     digest = upload(client, zip_bytes).json()["digest"]
-    info = client.get(f"/api/bundles/{digest}/members/dataset/derived/overview").json()
+    info = derive_ready(client, f"/api/bundles/{digest}/members/dataset/derived/overview")
     url = info["files"][0]["url"]
     response = client.get(url)
     assert response.status_code == 200
@@ -633,44 +663,7 @@ def test_derived_file_etag(tmp_path: Path, zip_bytes: bytes) -> None:
     assert client.get(url, headers={"If-None-Match": f'"other", {etag}'}).status_code == 304
     assert client.get(url, headers={"If-None-Match": '"other"'}).status_code == 200
     assert client.get(url, headers={"If-None-Match": "*"}).status_code == 304
-
-
-class _Versioned:
-    """A test deriver whose outputs depend on its spec version."""
-
-    def __init__(self, version: int) -> None:
-        """Build the spec for ``version`` with one enum parameter."""
-        self.spec = DeriverSpec(
-            "tversion",
-            version,
-            ("rf_dataset",),
-            params=(ParamSpec("mode", "enum", values=("a/b", "c d")),),
-        )
-
-    def param_space(self, ctx: Any) -> list[dict[str, str]]:
-        """Return both enum values."""
-        return [{"mode": "a/b"}, {"mode": "c d"}]
-
-    def derive(self, ctx: Any, params: Any) -> dict[str, Any]:
-        """Return a JSON file and a binary blob tagged with the version."""
-        return {
-            "out.json": {"mode": params["mode"], "version": self.spec.version},
-            "blob.bin": bytes([self.spec.version]) * 16,
-        }
-
-
-class _Boom:
-    """A test deriver that always fails."""
-
-    spec = DeriverSpec("tboom", 1, ("rf_dataset",))
-
-    def param_space(self, ctx: Any) -> list[dict[str, str]]:
-        """No parameters."""
-        return [{}]
-
-    def derive(self, ctx: Any, params: Any) -> dict[str, Any]:
-        """Raise a runtime error."""
-        raise RuntimeError("boom")
+    app.state.jobs.shutdown()
 
 
 def test_derived_version_bump(tmp_path: Path, zip_bytes: bytes) -> None:
@@ -679,10 +672,8 @@ def test_derived_version_bump(tmp_path: Path, zip_bytes: bytes) -> None:
     store: Store = app.state.store
     digest = upload(client, zip_bytes).json()["digest"]
     base = f"/api/bundles/{digest}/members/dataset/derived/tversion"
-    with registered(_Versioned(1)):
-        response = client.get(base, params={"mode": "a/b"})
-        assert response.status_code == 200
-        info = response.json()
+    with registered(Versioned(1)):
+        info = derive_ready(client, base, {"mode": "a/b"})
         assert info["params_key"] == "mode=a%2Fb"
         assert info["links_key"] == "nolink"
         for item in info["files"]:
@@ -706,9 +697,9 @@ def test_derived_version_bump(tmp_path: Path, zip_bytes: bytes) -> None:
             if item["name"] == "blob.bin":
                 assert headers["content-type"] == "application/octet-stream"
         v1_urls = [item["url"] for item in info["files"]]
-    register(_Versioned(2), replace=True)
+    register(Versioned(2), replace=True)
     try:
-        info2 = client.get(base, params={"mode": "a/b"}).json()
+        info2 = derive_ready(client, base, {"mode": "a/b"})
         assert all("/v2/" in item["url"] for item in info2["files"])
         assert [item["url"] for item in info2["files"]] != v1_urls
         for url in v1_urls:
@@ -720,12 +711,13 @@ def test_derived_version_bump(tmp_path: Path, zip_bytes: bytes) -> None:
         assert json.loads(body)["version"] == 2
     finally:
         unregister("tversion")
+        app.state.jobs.shutdown()
 
 
 def test_derived_file_404s(tmp_path: Path, zip_bytes: bytes) -> None:
     """AC7: meta, unknown names, odd keys and unknown derivers answer 404."""
-    _app, client, digest = _upload_and_digest(tmp_path, zip_bytes)
-    info = client.get(f"/api/bundles/{digest}/members/dataset/derived/overview").json()
+    app, client, digest = _upload_and_digest(tmp_path, zip_bytes)
+    info = derive_ready(client, f"/api/bundles/{digest}/members/dataset/derived/overview")
     url = info["files"][0]["url"]
     directory_url = url.rsplit("/", 1)[0]
     assert client.get(f"{directory_url}/_meta.json").status_code == 404
@@ -738,6 +730,7 @@ def test_derived_file_404s(tmp_path: Path, zip_bytes: bytes) -> None:
     assert client.get(wrong_links).status_code == 404
     unknown = f"/api/bundles/{digest}/members/dataset/derived/nope/v1/noparams/nolink/x.json"
     assert client.get(unknown).status_code == 404
+    app.state.jobs.shutdown()
 
 
 def _upload_and_digest(tmp_path: Path, zip_bytes: bytes) -> tuple[Any, TestClient, str]:
@@ -760,7 +753,7 @@ def test_derivers_listing(tmp_path: Path) -> None:
         "eager": True,
         "params": [],
     }
-    with registered(_Versioned(1)):
+    with registered(Versioned(1)):
         body = client.get("/api/derivers").json()
         tversion = next(item for item in body["derivers"] if item["name"] == "tversion")
         assert tversion["params"][0]["values"] == ["a/b", "c d"]
@@ -775,7 +768,7 @@ def test_derive_error_mapping(tmp_path: Path, zip_bytes: bytes) -> None:
     error = unknown_param.json()["error"]
     assert error["type"] == "bad_params"
     assert error["member"] == "dataset"
-    with registered(_Versioned(1)):
+    with registered(Versioned(1)):
         assert client.get(f"{base}/tversion", params={"mode": "zzz"}).status_code == 400
         repeated = client.get(f"{base}/tversion", params=[("mode", "a/b"), ("mode", "c d")])
         assert repeated.status_code == 400
@@ -783,13 +776,14 @@ def test_derive_error_mapping(tmp_path: Path, zip_bytes: bytes) -> None:
     assert client.get(f"{base}/nope").status_code == 404
     scene = client.get(f"/api/bundles/{digest}/members/scene/derived/overview")
     assert scene.status_code == 404
-    with registered(_Boom()):
-        failed = client.get(f"{base}/tboom")
-        assert failed.status_code == 500
-        error = failed.json()["error"]
-        assert error["type"] == "derive_failed"
-        assert error["member"] == "dataset"
-        assert "boom" in error["message"]
+    with registered(Boom()):
+        accepted = client.get(f"{base}/tboom")
+        assert accepted.status_code == 202
+        info = poll_job(client, accepted.json()["job_id"])
+        assert info["status"] == "failed"
+        assert info["reason"] == "error"
+        assert "boom" in info["error"]
+    _app.state.jobs.shutdown()
 
 
 def test_health(tmp_path: Path) -> None:
