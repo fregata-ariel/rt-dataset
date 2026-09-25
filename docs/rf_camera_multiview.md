@@ -280,6 +280,18 @@ aperture CFR:
   direction)
 - dominant-delay power (`dominant_delay_power`: 0 there)
 
+The development is implemented once in
+`plateau_rt.domain.rf_camera.develop`: `develop_hemisphere_image` (spatial FFT
+-> calibration -> `A = kx * U`), `center_frequency_products` and
+`delay_products` produce the derived files above, `angle_delay_power` returns
+the full angle-delay volume, and `raw_spectrum_energy` checks the manifest's
+`hemisphere_energy`. The writer calls those functions, and
+`develop_params_from_manifest` in `plateau_rt.application.rf_camera_develop`
+rebuilds their parameters from a manifest. The back hemisphere is developed by
+the same function on the same grid, so pixel `(ky, kz)` maps to direction
+`(-kx, ky, kz)` there. A byte-exact golden for the five derived arrays lives in
+`tests/fixtures/rf_camera_develop/` (`python .../make_golden.py --check`).
+
 The full `[kz, ky, frequency]` or `[kz, ky, delay]` volume is intentionally not
 stored for every production view. This avoids a large storage multiplier while
 keeping all information needed to regenerate it.

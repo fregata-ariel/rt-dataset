@@ -37,21 +37,22 @@ from plateau_rt.adapters.sionna.rf_tracing import (
     trace_paths,
 )
 from plateau_rt.application.scene_checks import check_scene_carrier_frequency
-from plateau_rt.domain.rf_camera.calibration import (
-    calibrate_angular_cfr,
-    geometric_los_source_direction_local,
-)
+from plateau_rt.domain.rf_camera.calibration import geometric_los_source_direction_local
 from plateau_rt.domain.rf_camera.camera import (
     HEMISPHERES,
     IMAGE_QUANTITY,
     PROJECTION,
     RFViewSpec,
     build_direction_cosine_camera_model,
-    to_solid_angle_amplitude,
     view_pose_payload,
 )
-from plateau_rt.domain.rf_camera.delay import angular_cfr_to_delay, dominant_delay
-from plateau_rt.domain.rf_camera.imaging import aperture_to_angular_fft, frequency_offsets
+from plateau_rt.domain.rf_camera.develop import (
+    DevelopParams,
+    center_frequency_products,
+    delay_products,
+    develop_hemisphere_image,
+)
+from plateau_rt.domain.rf_camera.imaging import frequency_offsets
 from plateau_rt.domain.rf_camera.paths import (
     PATH_GEOMETRY_GT_FILE_NAME,
     PATH_SCHEMA_FILE_NAME,
@@ -417,7 +418,9 @@ class RFMultiViewDataset:
         """Save one (view, BS) slice's derived summaries.
 
         ``aperture_cfr_bs`` is ``[hemisphere, row, col, freq]``; the developed
-        summaries use the front hemisphere. Returns the per-BS manifest entry.
+        summaries use the front hemisphere via
+        :mod:`plateau_rt.domain.rf_camera.develop`. Returns the per-BS manifest
+        entry.
         """
         cfg = self.config
         bs_dir = output_dir / "views" / view.view_id / "rf" / bs_id
@@ -431,46 +434,37 @@ class RFMultiViewDataset:
             "debug_power_png": bs_dir / "angular_power_center.png",
         }
 
-        front = aperture_cfr_bs[HEMISPHERES.index("front")]
-        calibration = calibrate_angular_cfr(
-            aperture_to_angular_fft(front, fft_rows=cfg.fft_rows, fft_cols=cfg.fft_cols),
-            aperture_rows=cfg.rx_rows,
-            aperture_cols=cfg.rx_cols,
+        params = DevelopParams(
+            fft_rows=cfg.fft_rows,
+            fft_cols=cfg.fft_cols,
+            rx_rows=cfg.rx_rows,
+            rx_cols=cfg.rx_cols,
             horizontal_spacing_lambda=cfg.horizontal_spacing_lambda,
             vertical_spacing_lambda=cfg.vertical_spacing_lambda,
+            phase_floor_db=cfg.phase_floor_db,
         )
-        image = to_solid_angle_amplitude(
-            calibration.cfr, calibration.ky_over_k, calibration.kz_over_k
+        developed = develop_hemisphere_image(aperture_cfr_bs[HEMISPHERES.index("front")], params)
+        center = center_frequency_products(
+            developed.image,
+            valid_ray_mask,
+            cfg.phase_floor_db,
+            freq_bin=cfg.num_frequency_bins // 2,
         )
+        delays = delay_products(developed.image, valid_ray_mask, frequency_offsets_hz)
 
-        center_cfr = image[:, :, cfg.num_frequency_bins // 2]
-        center_power = np.abs(center_cfr) ** 2
-        np.save(artifacts["angular_cfr_center"], center_cfr.astype(np.complex64, copy=False))
-        np.save(artifacts["angular_power_center"], center_power.astype(np.float32, copy=False))
+        np.save(artifacts["angular_cfr_center"], center.center_cfr)
+        np.save(artifacts["angular_power_center"], center.center_power)
+        np.save(artifacts["phase_valid_mask"], center.phase_valid)
+        np.save(artifacts["dominant_delay_s"], delays.dominant_delay_s)
+        np.save(artifacts["dominant_delay_power"], delays.dominant_delay_power)
 
-        view_peak = max(float(np.max(center_power[valid_ray_mask])), 1e-30)
-        phase_valid = valid_ray_mask & (
-            center_power >= view_peak * 10.0 ** (cfg.phase_floor_db / 10.0)
-        )
-        np.save(artifacts["phase_valid_mask"], phase_valid)
-
-        delay_volume = angular_cfr_to_delay(image, frequency_offsets_hz)
-        _, dominant_delay_s, dominant_power = dominant_delay(
-            np.abs(delay_volume.cir) ** 2,
-            delay_volume.delay_s,
-        )
-        observed_mask = np.asarray(valid_ray_mask, dtype=bool) & (np.asarray(dominant_power) > 0.0)
-        dominant_delay_s = dominant_delay_s.astype(np.float32)
-        dominant_delay_s[~observed_mask] = np.nan
-        dominant_power = dominant_power.astype(np.float32)
-        dominant_power[~observed_mask] = 0.0
-        np.save(artifacts["dominant_delay_s"], dominant_delay_s)
-        np.save(artifacts["dominant_delay_power"], dominant_power)
-
+        view_peak = max(float(np.max(center.center_power[valid_ray_mask])), 1e-30)
         save_direction_image(
-            np.ma.masked_where(~valid_ray_mask, normalized_power_db(center_power, view_peak)),
+            np.ma.masked_where(
+                ~valid_ray_mask, normalized_power_db(center.center_power, view_peak)
+            ),
             artifacts["debug_power_png"],
-            extent=image_extent(calibration.ky_over_k, calibration.kz_over_k),
+            extent=image_extent(developed.ky_over_k, developed.kz_over_k),
             title=f"RF camera {bs_id} front hemisphere |A|^2, center freq [dB rel. view peak]",
             colorbar_label="dB",
             vmin=-60.0,
