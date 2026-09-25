@@ -956,5 +956,59 @@ def rf_tomo_bench(
     )
 
 
+@cli.command("rf-tomo-gt")
+@click.argument("dataset", type=click.Path(exists=True, path_type=Path))
+@click.option("--scene", type=click.Path(exists=True, path_type=Path), default=None)
+@click.option("--out", type=click.Path(path_type=Path), default=None)
+@click.option("--no-register", is_flag=True, default=False, show_default=True)
+@click.option("--no-surfaces", is_flag=True, default=False, show_default=True)
+@click.option("--surface-spacing", type=float, default=0.25, show_default=True)
+@click.option("--surface-margin", type=float, default=5.0, show_default=True)
+@click.option(
+    "--los-polarization", type=click.Choice(["none", "vv"]), default="none", show_default=True
+)
+@click.option("--cluster-tol", type=float, default=0.01, show_default=True)
+def rf_tomo_gt(
+    dataset: Path,
+    scene: Path | None,
+    out: Path | None,
+    no_register: bool,
+    no_surfaces: bool,
+    surface_spacing: float,
+    surface_margin: float,
+    los_polarization: str,
+    cluster_tol: float,
+):
+    """Build tomography_gt.npz from a dataset's path ground truth and scene mesh (T17)."""
+    import json
+
+    import numpy as np
+
+    from plateau_rt.application.rf_dataset_manifest import ManifestError
+    from plateau_rt.application.rf_tomography_gt import (
+        summarize_tomography_gt,
+        write_tomography_gt,
+    )
+
+    try:
+        path = write_tomography_gt(
+            dataset,
+            scene=scene,
+            out=out,
+            register=not no_register,
+            surfaces=not no_surfaces,
+            surface_spacing=surface_spacing,
+            surface_margin=surface_margin,
+            los_polarization=los_polarization,
+            cluster_tol_m=cluster_tol,
+        )
+    except (ValueError, FileNotFoundError, ManifestError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"tomography_gt: {path}")
+    with np.load(path, allow_pickle=False) as payload:
+        arrays = {name: np.asarray(payload[name]) for name in payload.files}
+    click.echo(json.dumps(summarize_tomography_gt(arrays)))
+
+
 if __name__ == "__main__":
     cli()
