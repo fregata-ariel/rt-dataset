@@ -29,6 +29,16 @@ dev = [
     "jupyter>=1.0.0",
     "ty>=0.0.75",
 ]
+# viewer: Web viewer の backend (Sionna なしで動く。multipart は使わないので python-multipart は入れない)
+viewer = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "httpx>=0.27",         # fastapi.testclient.TestClient 用
+    "numpy>=1.26.0",
+    "scipy>=1.11.0",
+    "trimesh>=4.0.0",
+    "defusedxml>=0.7.1",
+]
 
 [tool.ruff]
 line-length = 100

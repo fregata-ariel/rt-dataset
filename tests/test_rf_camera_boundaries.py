@@ -39,6 +39,12 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.viewer.kinds",
     "plateau_rt.viewer.derive.overview",
     "plateau_rt.viewer.testing",
+    "plateau_rt.viewer.ingest",
+    "plateau_rt.viewer.api",
+    "plateau_rt.viewer.api.app",
+    "plateau_rt.viewer.api.errors",
+    "plateau_rt.viewer.api.routes_bundles",
+    "plateau_rt.viewer.api.routes_derived",
 ]
 
 

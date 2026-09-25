@@ -63,6 +63,10 @@ class BundleValidationError(ValueError):
         super().__init__(message if member_id is None else f"member {member_id!r}: {message}")
 
 
+class UnknownKindError(BundleValidationError):
+    """The bundle has no supported member kind (or names an unsupported one)."""
+
+
 @dataclass(frozen=True)
 class Member:
     """One detected bundle member: id, kind, bundle-relative path and links."""
@@ -210,7 +214,7 @@ def _detect_from_bundle_json(root: Path) -> list[Member]:
             raise BundleValidationError(member_id, "duplicate member id")
         kind = entry.get("kind")
         if kind not in MEMBER_KINDS:
-            raise BundleValidationError(
+            raise UnknownKindError(
                 member_id,
                 f"invalid kind {kind!r}; expected one of rf_dataset, rf_partial, tomo_run, scene",
             )
@@ -387,7 +391,7 @@ def _detect_fallback(root: Path) -> list[Member]:
         if candidate.is_file() and not candidate.is_symlink():
             found.append((file_name, member_id, kind))
     if not found:
-        raise BundleValidationError(
+        raise UnknownKindError(
             None,
             "no bundle.json and no marker manifest at the bundle root (expected exactly one of "
             "dataset_manifest.json, partial_manifest.json, run_manifest.json)",
@@ -415,10 +419,10 @@ def validate_member(
     if member.kind == "rf_partial":
         return _validate_partial(member, root)
     if member.kind == "tomo_run":
-        raise BundleValidationError(
+        raise UnknownKindError(
             member.id, "unsupported member kind 'tomo_run' (supported from V3-2, #71)"
         )
-    raise BundleValidationError(member.id, f"unsupported member kind {member.kind!r}")
+    raise UnknownKindError(member.id, f"unsupported member kind {member.kind!r}")
 
 
 def _read_manifest_bytes(member: Member, root: Path, relpath: str) -> bytes:

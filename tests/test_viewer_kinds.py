@@ -32,6 +32,7 @@ from plateau_rt.viewer.extract import safe_extract
 from plateau_rt.viewer.kinds import (
     BundleValidationError,
     Member,
+    UnknownKindError,
     detect_members,
     validate_bundle,
     validate_member,
@@ -178,6 +179,50 @@ def test_fallback_no_markers(tmp_path: Path) -> None:
         detect_members(tmp_path)
     assert excinfo.value.member_id is None
     assert "no marker manifest" in excinfo.value.message
+
+
+def test_unknown_kind_no_markers(tmp_path: Path) -> None:
+    """A root with only unrelated files raises UnknownKindError."""
+    (tmp_path / "ok.txt").write_text("ok", encoding="utf-8")
+    with pytest.raises(UnknownKindError) as excinfo:
+        detect_members(tmp_path)
+    assert excinfo.value.member_id is None
+    assert "no marker manifest" in excinfo.value.message
+
+
+def test_unknown_kind_from_bundle_json(tmp_path: Path) -> None:
+    """A bundle.json member with an unsupported kind raises UnknownKindError."""
+    write_raw_bundle_json(
+        tmp_path,
+        {
+            "bundle_format_version": 1,
+            "members": [{"id": "d", "kind": "movie", "path": "dataset"}],
+        },
+    )
+    with pytest.raises(UnknownKindError) as excinfo:
+        detect_members(tmp_path)
+    assert excinfo.value.member_id == "d"
+    assert "invalid kind 'movie'" in excinfo.value.message
+
+
+def test_several_markers_is_not_unknown_kind(tmp_path: Path) -> None:
+    """Two root markers raise a plain BundleValidationError, not UnknownKindError."""
+    write_rf_dataset(tmp_path)
+    (tmp_path / "partial_manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(BundleValidationError) as excinfo:
+        detect_members(tmp_path)
+    assert not isinstance(excinfo.value, UnknownKindError)
+    assert "several marker manifests" in excinfo.value.message
+
+
+def test_validate_tomo_run_is_unknown_kind(tmp_path: Path) -> None:
+    """validate_member rejects tomo_run with UnknownKindError."""
+    (tmp_path / "run_manifest.json").write_text("{}", encoding="utf-8")
+    member = Member("run", "tomo_run", "run")
+    with pytest.raises(UnknownKindError) as excinfo:
+        validate_member(member, tmp_path)
+    assert excinfo.value.member_id == "run"
+    assert "unsupported member kind 'tomo_run'" in excinfo.value.message
 
 
 def _minimal_dataset_bundle(tmp_path: Path) -> Path:

@@ -56,11 +56,11 @@ WORKDIR /app
 # ---------------------------------------------------------------------------- deps
 FROM base AS deps
 
-# uv.lock 通りの依存 (test グループ) だけを入れる。sionna-rt はサブモジュールのソースからビルドされる。
+# uv.lock 通りの依存 (test と viewer グループ) だけを入れる。sionna-rt はサブモジュールのソースからビルドされる。
 COPY --chown=app:app pyproject.toml uv.lock .python-version ./
 COPY --chown=app:app third_party/sionna-rt third_party/sionna-rt
 RUN --mount=type=cache,target=/home/app/.cache/uv,uid=1000,gid=1000 \
-    uv sync --locked --no-default-groups --group test
+    uv sync --locked --no-default-groups --group test --group viewer
 
 # ---------------------------------------------------------------------------- prod
 FROM deps AS prod
@@ -82,9 +82,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chmod 0440 /etc/sudoers.d/app
 
 USER app
-# dev グループ (test を含む) を追加で入れる
+# dev グループ (test を含む) を追加で入れる (viewer グループも残す)
 RUN --mount=type=cache,target=/home/app/.cache/uv,uid=1000,gid=1000 \
-    uv sync --locked
+    uv sync --locked --group viewer
 
 COPY --chown=app:app src/ src/
 COPY --chown=app:app configs/ configs/
