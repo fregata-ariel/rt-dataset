@@ -522,13 +522,24 @@ def virtual_sources(
 
     for (b, key_objects), members in groups.items():
         positions = np.array([vs_all[v, b, p] for v, b, p in members], dtype=np.float64)
-        groups_idx = _cluster_members(members, positions, cluster_tol_m)
         order = len(key_objects)
+        if order == 0:
+            # The order-0 virtual source is the BS itself by definition, so no
+            # clustering: every member (LoS or the refraction stand-in) joins
+            # one cluster centred exactly on the BS position.
+            groups_idx = [list(range(len(members)))]
+        else:
+            groups_idx = _cluster_members(members, positions, cluster_tol_m)
         for member_index in groups_idx:
             member_slots = [members[index] for index in member_index]
             member_positions = positions[member_index]
-            centre = np.mean(member_positions, axis=0)
-            spread = float(np.max(np.linalg.norm(member_positions - centre, axis=1)))
+            if order == 0:
+                bs_position = np.array(geom.bs_pos[b], dtype=np.float64, copy=True)
+                centre = bs_position
+                spread = float(np.max(np.linalg.norm(member_positions - bs_position, axis=1)))
+            else:
+                centre = np.mean(member_positions, axis=0)
+                spread = float(np.max(np.linalg.norm(member_positions - centre, axis=1)))
             member_powers = np.array([power[slot] for slot in member_slots])
             representative = member_slots[int(np.argmax(member_powers))]
 
@@ -563,7 +574,7 @@ def virtual_sources(
                 view_power[v] = float(sum(power[slot] for slot in view_members))
                 view_powers = np.array([power[slot] for slot in view_members])
                 best = view_members[int(np.argmax(view_powers))]
-                rho_eff[v] = _effective_rho(path, geom, best, pattern)
+                rho_eff[v] = effective_rho(path, geom, best, pattern)
                 view_type[v] = types[best]
                 if order == 0:
                     theta_inc[v] = 0.0
@@ -628,13 +639,13 @@ def virtual_sources(
     )
 
 
-def _effective_rho(
+def effective_rho(
     path: PathGT,
     geom: CaptureGeometry,
     slot: tuple[int, int, int],
     pattern: str,
 ) -> complex:
-    """Return the effective amplitude ``rho_eff`` of one path under the VS model."""
+    """Return the effective VS amplitude of one path slot ``(v, b, p)`` (design §6.1)."""
     v, b, p = slot
     u_local = arrival_unit_vectors(path.theta_r[v, b, p], path.phi_r[v, b, p]) @ geom.ue_rot[v]
     alpha = aperture_coefficient(path.a_baseband[v, b, :, :, :, p], u_local, geom)

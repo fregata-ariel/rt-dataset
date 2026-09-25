@@ -24,6 +24,7 @@ from plateau_rt.domain.rf_tomography.gt import (
     PathGT,
     aperture_coefficient,
     beyond_period,
+    effective_rho,
     ground_bounce_visibility,
     interaction_table,
     los_model_error,
@@ -199,6 +200,35 @@ def test_second_order_departure() -> None:
         beta = order_two.beta[v]
         errors.append(abs(wrong - beta) / abs(beta))
     assert max(errors) > 1e-2
+
+
+def test_order0_vs_is_bs_position() -> None:
+    float_scene = build_mirror_scene(float32=True)
+    arrays = path_ground_truth(_path(float_scene), float_scene.geom, pattern="tr38901")
+    order, pos = arrays["vs_order"], arrays["vs_pos"]
+    bs, spread = arrays["vs_bs"], arrays["vs_spread"]
+    for m in range(order.shape[0]):
+        if order[m] != 0:
+            continue
+        np.testing.assert_array_equal(pos[m], float_scene.geom.bs_pos[bs[m]])
+        assert 0.0 < spread[m] < 1e-4
+
+    exact = build_mirror_scene()
+    exact_arrays = path_ground_truth(_path(exact), exact.geom, pattern="tr38901")
+    order0 = exact_arrays["vs_order"] == 0
+    assert bool(np.any(order0))
+    assert float(np.max(exact_arrays["vs_spread"][order0])) < 1e-9
+
+
+def test_effective_rho_public() -> None:
+    scene = build_mirror_scene()
+    path = _path(scene)
+    los = effective_rho(path, scene.geom, (0, 0, 0), "tr38901")
+    assert abs(los - 1.0) < 1e-9
+    ground = next(vs for vs in scene.vs if vs.bs == 1 and vs.planes == ("ground",))
+    value = effective_rho(path, scene.geom, (0, 1, 1), "tr38901")
+    beta = ground.beta[0]
+    assert abs(value - beta) <= 1e-9 * abs(beta)
 
 
 def test_los_model_error_iso_and_tr38901() -> None:

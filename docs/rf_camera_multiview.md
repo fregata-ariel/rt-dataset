@@ -898,6 +898,85 @@ slightly in the traced values (the bank, splits and seeds do not change).
   also re-samples the diffraction paths, which leaves up to 1 % of the capture
   power on NLoS captures, hence its looser tolerance.
 
+### Resynthesis, BS-pattern and polarisation check (#15 T21)
+
+`scripts/ci/check_tomography_resynthesis.py DATASET [--gt NPZ] [--report JSON]`
+(`application/rf_tomography_resynthesis.py`, heavy CI Step 11 after
+`rf-tomo-gt`) checks the tomography operators against the traced data. It uses
+the registered `tomography_gt.npz` when there is one (and fails if its
+`source_path_gt_sha256` no longer matches the path GT); otherwise it builds the
+GT in memory.
+
+- **L0f resynthesis.** Each VS-candidate path of the path GT becomes a
+  `forward_exact.atom_cfr` atom at its clustered VS position. Its amplitude is
+  `effective_rho · G_b(d_traced) / G_b(d_op)`, summed over the paths of the same
+  VS and view. The gain ratio re-references the amplitude to the operator's
+  first-order (Householder) departure direction. For orders 0 and 1 the ratio
+  must be 1 within 0.01 dB. For higher orders the ratio can be anything, because
+  their amplitudes are per view (design §3.2). The target is `aperture_cfr`
+  minus the resynthesised diffraction and diffuse paths. Every capture must
+  reach an NMSE below 1e-3, both raw and after the common (φ, τ) gauge fit.
+- **Direct paths.** Each LoS-visible capture's path-GT LoS is compared with the
+  model LoS atom, using the dataset pattern and the V-pol co-polar factor. The
+  ratio must be within 0.5 dB.
+- **Reported, not gated.**
+  - ε_LoS (the LoS phase-model error).
+  - The LoS error of the scalar operator model (`polarization="none"`).
+  - The V-pol factors of the LoS and of first-order specular VS.
+- **Controls.**
+  - Flipping the model's element rows must break L0f: the median NMSE must
+    exceed 0.1.
+  - The iso pattern must fail the 0.5 dB direct-path gate.
+- **Order-0 VS.** `tomography_gt` puts the order-0 VS exactly at the BS
+  position. The float32 per-path image positions scatter by about 2e-5 m. At
+  such an offset the operator treats the source as a mirror image with an
+  arbitrary normal, which gave an L0f NMSE of up to 0.93. A GT artifact built
+  before this change fails the order-0 gain-ratio gate and must be rebuilt.
+
+Measured on the rich mock city (GPU traces, check on CPU in 2–19 s):
+
+| dataset | L0f NMSE raw / aligned, max | gauge fit, max | order-0/1 gain ratio, max | direct path (V-pol), max | ε_LoS P50 / P90 / max |
+|---|---|---|---|---|---|
+| `ci` / refraction (16 captures, 69 VS) | 1.4e-5 / 1.2e-5 | 0.07°, 0.4 ps | 1.3e-5 / 3.9e-5 dB | 5.1e-6 dB | 0.011 / 0.016 / 0.026° |
+| `full` / specular (222 non-empty captures) | 3.6e-4 / 5.8e-5 | 1.1°, 16 ps | 6.4e-6 / 8.2e-5 dB | 2.7e-5 dB | 0.008 / 0.028 / 0.051° |
+| `full` / refraction (320 captures, 420 VS) | 3.5e-4 / 5.3e-5 | 1.1°, 15 ps | 3.9e-5 / 8.3e-5 dB | 2.7e-5 dB | 0.008 / 0.028 / 0.051° |
+| `full` / diffraction (320 captures, 415 VS) | 3.5e-4 / 5.3e-5 | 1.1°, 15 ps | 3.9e-5 / 8.3e-5 dB | 2.7e-5 dB | 0.008 / 0.028 / 0.051° |
+
+The median L0f NMSE is 1e-8 to 4e-7. Without the gain ratio, the order ≥ 2 VS
+leave up to 0.93. Two views of the `full` refraction bank each hold two
+distinct Sionna paths with the same VS and delay. Keeping only the stronger
+path would give 1.2e-3.
+
+**Polarisation.** Sionna traces a V-pol BS and V-pol UE elements. The operators
+default to the scalar model (`polarization="none"`). The co-polar factor
+`polarization="vv"` is real.
+
+- For the LoS it lies in [0.95, 1] on `ci` and in [0.049, 1] on `full`. It is
+  never negative.
+- For first-order specular VS its magnitude is within 1.8 dB of 1. Its sign is
+  constant across the views of each VS (0 of 28 VS change sign).
+
+| quantity | `ci` P50 / P90 / max | `full` P50 / P90 / max |
+|---|---|---|
+| LoS amplitude error, scalar model | 0.26 / 0.42 / 0.43 dB | 0.17 / 0.82 / 26.1 dB |
+| LoS relative error \|1 − r\|, scalar model | 0.030 / 0.048 / 0.049 | 0.020 / 0.090 / 0.95 |
+| LoS relative error \|1 − r\|, V-pol model | 1.9e-4 / 2.8e-4 / 4.5e-4 | 1.4e-4 / 4.8e-4 / 8.8e-4 |
+| first-order \|V-pol factor\| | 0.006 / 0.026 / 0.038 dB | 0.035 / 0.48 / 1.8 dB |
+
+Phases are unaffected: ε_LoS is identical for both models. Gauge recovery and
+phase-based localisation therefore need no polarisation factor. Amplitudes are
+affected:
+
+- The C13 LoS atom (free real gain g_c > 0) absorbs the factor, and so do
+  per-view amplitudes.
+- A view-independent amplitude (shared β, the constrained (a″) model, held-out
+  amplitude prediction) does not. On the `full` bank the scalar model's LoS
+  error reaches −21 dB at P90, with outliers near cross-polarisation.
+- Solvers and predictions that share amplitudes across views should use
+  `polarization="vv"`. `forward_exact`, `forward_sep`, `backproject` and
+  `kernels` already implement it, but the registry and runner do not pass it
+  yet.
+
 ## Delay sampling note
 
 With bandwidth `B` and `N` frequency bins:

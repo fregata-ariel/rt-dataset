@@ -11,6 +11,7 @@
 #   9. カバレッジマップUE配置 (#16): 保存ラジオマップ+seed の再現性確認、
 #      LoS/NLoS 割当と幾何 LoS マスク (トレースした LoS パスとの一致)、BS ごとのしきい値 (any)
 #  10. トモグラフィー用データセットプロファイル (#15 T20): rich mock city の ci プロファイル (8 リング視点 x 2 BS, N=128, los=False オラクル) の manifest 検査
+#  11. トモグラフィーGT (T17) と再合成・BSパターン・偏波の検証 (#15 T21): L0f NMSE < 1e-3, 直接波比 0.5 dB 以内
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
@@ -75,5 +76,10 @@ rm -rf "${TOMO}"
 gpu_run make MOCK_OUT="${TOMO}/" rf-tomo-profile-mock-city
 gpu_run python scripts/ci/check_tomography_profile.py "${TOMO}/rf_tomo/ci/refraction" \
   --profile ci --num-views 8 --num-bs 2
+
+echo "🔁 Step 11: Tomography GT, L0f resynthesis and BS-pattern check (#15 T17, T21)"
+gpu_run python -m plateau_rt.cli.main rf-tomo-gt "${TOMO}/rf_tomo/ci/refraction"
+gpu_run python scripts/ci/check_tomography_resynthesis.py "${TOMO}/rf_tomo/ci/refraction" \
+  --report "${CI_REPORT_DIR}/tomography_resynthesis.json"
 
 echo "✅ Heavy CI finished"

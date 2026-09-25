@@ -6,17 +6,28 @@ z = 0 and two walls (x = 20 and y = 25) of one building object, one or two
 BSs and a ring of UEs. Every specular path is generated with the scalar VS
 model of design §3.2 (``beta * G_b(d_dep) * lam / (4 pi L) * exp(-j k L)``
 times the carrier-only element phase), so the expected ``vs_rho_eff`` is the
-injected ``beta``. This is a plain helper module, not a test file.
+injected ``beta``. With ``los_polarization`` the LoS paths carry the V-pol
+co-polar factor as their ``beta`` (as Sionna traces them), and
+``write_mirror_dataset`` stores a dataset whose aperture CFR is resynthesised
+from the path GT (T21). This is a plain helper module, not a test file.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
+from rf_manifest_fixtures import write_v3_dataset
 from scipy.constants import c as SPEED_OF_LIGHT
 
 from plateau_rt.domain.rf_camera.camera import generate_ring_views
+from plateau_rt.domain.rf_camera.paths import (
+    PATH_GT_MODE_CANONICAL,
+    build_path_schema,
+    synthesize_cfr,
+)
 from plateau_rt.domain.rf_tomography.antenna import bs_pattern
 from plateau_rt.domain.rf_tomography.geometry import CaptureGeometry, hemisphere_index
 
@@ -65,6 +76,29 @@ class MirrorScene:
     los_visible: np.ndarray  # [V, B]
     ground_bounce_visible: np.ndarray  # [V, B]
     beyond_period: np.ndarray  # [V, B, P]
+
+
+def _theta_hat(local: np.ndarray) -> np.ndarray:
+    """Return the V-pol field unit vector of a UE/BS-local direction."""
+    local = np.asarray(local, dtype=np.float64)
+    theta = np.arccos(np.clip(local[2], -1.0, 1.0))
+    phi = np.arctan2(local[1], local[0])
+    return np.array(
+        [
+            np.cos(theta) * np.cos(phi),
+            np.cos(theta) * np.sin(phi),
+            -np.sin(theta),
+        ]
+    )
+
+
+def v_pol_factor(
+    geom: CaptureGeometry, v: int, b: int, d_dep: np.ndarray, d_arr: np.ndarray
+) -> float:
+    """Return the real V-pol co-polar factor of the LoS departure/arrival directions."""
+    e_t = geom.bs_rot[b] @ _theta_hat(geom.bs_rot[b].T @ d_dep)
+    e_r = geom.ue_rot[v] @ _theta_hat(geom.ue_rot[v].T @ d_arr)
+    return float(e_t @ e_r)
 
 
 def mirror(point: np.ndarray, plane: str) -> np.ndarray:
@@ -123,7 +157,11 @@ def _element_coefficients(
 
 
 def build_mirror_scene(
-    num_views: int = 6, *, pattern: str = "tr38901", float32: bool = False
+    num_views: int = 6,
+    *,
+    pattern: str = "tr38901",
+    float32: bool = False,
+    los_polarization: bool = False,
 ) -> MirrorScene:
     """Return the synthetic mirror-plane scene (see the module docstring)."""
     geom = _geometry(num_views)
@@ -218,7 +256,12 @@ def build_mirror_scene(
                 )
                 los_visible[v, b] = False
             else:
-                add(v, b, slot, beta=1.0, chain=[], code=0, key="los", cos_inc=1.0)
+                los_beta: complex = 1.0
+                if los_polarization:
+                    d_dep = (ue - bs) / np.linalg.norm(ue - bs)
+                    d_arr = -d_dep
+                    los_beta = v_pol_factor(geom, v, b, d_dep, d_arr)
+                add(v, b, slot, beta=los_beta, chain=[], code=0, key="los", cos_inc=1.0)
             slot += 1
             planes = ("ground", "wall_a", "wall_b") if b == 0 else ("ground",)
             for name in planes:
@@ -300,3 +343,40 @@ def build_mirror_scene(
 def expected_planes() -> dict[str, tuple[np.ndarray, float, int]]:
     """Return ``{name: (normal, offset, object)}`` with ``normal . x = offset``."""
     return {name: (n, float(np.dot(n, p0)), obj) for name, (p0, n, obj) in PLANES.items()}
+
+
+def write_mirror_dataset(
+    root: Path, *, float32: bool = True, los_polarization: bool = True
+) -> MirrorScene:
+    """Write a self-consistent mirror-scene dataset whose CFR matches its path GT."""
+    root = Path(root)
+    views = generate_ring_views(target=TARGET, radius_m=15.0, ue_height_m=1.5, num_views=6)
+    manifest = write_v3_dataset(
+        root,
+        views=views,
+        rows=4,
+        cols=4,
+        bins=64,
+        bs_positions=BS_POS,
+        bs_look_at=TARGET,
+        source_scene="scene/scene.xml",
+    )
+    scene = build_mirror_scene(float32=float32, los_polarization=los_polarization)
+    np.savez_compressed(root / "path_geometry_gt.npz", **scene.arrays)
+    schema = build_path_schema(
+        scene.arrays,
+        mode=PATH_GT_MODE_CANONICAL,
+        object_names=OBJECT_NAMES,
+        carrier_frequency_hz=F_C,
+        bs_ids=["bs_000", "bs_001"],
+        view_ids=[view.view_id for view in views],
+    )
+    (root / "path_schema.json").write_text(json.dumps(schema, indent=2), encoding="utf-8")
+    offsets = np.asarray(manifest["frequency_offsets_hz"], dtype=np.float64)
+    for v, view in enumerate(views):
+        baseband = np.asarray(scene.arrays["a_baseband"][v], dtype=np.complex128)
+        tau = np.asarray(scene.arrays["tau"][v], dtype=np.float64)[:, None, None, None, :]
+        aperture = synthesize_cfr(baseband, tau, offsets)
+        aperture = aperture.astype(np.complex64 if float32 else np.complex128)
+        np.save(root / "views" / view.view_id / "rf" / "aperture_cfr.npy", aperture)
+    return scene
