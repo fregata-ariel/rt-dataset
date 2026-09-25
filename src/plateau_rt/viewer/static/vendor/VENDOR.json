@@ -1,0 +1,78 @@
+{
+  "format": 1,
+  "note": "Third-party files served under /static/<build>/vendor/. Update by downloading the npm tarball at source_url, copying source_path to path, applying the recorded modification and refreshing sha256 / upstream_sha256.",
+  "files": [
+    {
+      "path": "three/three.module.js",
+      "package": "three",
+      "version": "0.186.1",
+      "source_url": "https://registry.npmjs.org/three/-/three-0.186.1.tgz",
+      "source_path": "package/build/three.module.js",
+      "sha256": "9052042d676cb0fdc1ddfefe193053f34b7ac0513a616fdac4535d49987812ea",
+      "license": "MIT",
+      "license_file": "three/LICENSE",
+      "upstream_sha256": "9052042d676cb0fdc1ddfefe193053f34b7ac0513a616fdac4535d49987812ea",
+      "modification": null
+    },
+    {
+      "path": "three/three.core.js",
+      "package": "three",
+      "version": "0.186.1",
+      "source_url": "https://registry.npmjs.org/three/-/three-0.186.1.tgz",
+      "source_path": "package/build/three.core.js",
+      "sha256": "9edde002b066a9a05676a6127f67735b62baf399bdea529f2f7e31657da769e6",
+      "license": "MIT",
+      "license_file": "three/LICENSE",
+      "upstream_sha256": "9edde002b066a9a05676a6127f67735b62baf399bdea529f2f7e31657da769e6",
+      "modification": null
+    },
+    {
+      "path": "three/OrbitControls.js",
+      "package": "three",
+      "version": "0.186.1",
+      "source_url": "https://registry.npmjs.org/three/-/three-0.186.1.tgz",
+      "source_path": "package/examples/jsm/controls/OrbitControls.js",
+      "sha256": "30386f7141d5ce5d5e0a3ab643e4eb16265f4564466108105ce449857f62fdda",
+      "license": "MIT",
+      "license_file": "three/LICENSE",
+      "upstream_sha256": "3d79d07ecb686b4e5d93232eedab255331c1beef711e13164eaa1f68655a5f2b",
+      "modification": "the bare import specifier 'three' is replaced by './three.module.js' (no import map: an inline import map would need a CSP exception)"
+    },
+    {
+      "path": "three/LICENSE",
+      "package": "three",
+      "version": "0.186.1",
+      "source_url": "https://registry.npmjs.org/three/-/three-0.186.1.tgz",
+      "source_path": "package/LICENSE",
+      "sha256": "8b378ebe60e2fe500158cb0ac71cb5e8b7d92953c2abcc63a0eb90499653b5bc",
+      "license": "MIT",
+      "license_file": "three/LICENSE",
+      "upstream_sha256": "8b378ebe60e2fe500158cb0ac71cb5e8b7d92953c2abcc63a0eb90499653b5bc",
+      "modification": null
+    },
+    {
+      "path": "plotly/plotly-strict.min.js",
+      "package": "plotly.js-strict-dist-min",
+      "version": "4.1.1",
+      "source_url": "https://registry.npmjs.org/plotly.js-strict-dist-min/-/plotly.js-strict-dist-min-4.1.1.tgz",
+      "source_path": "package/plotly-strict.min.js",
+      "sha256": "4ac841837b31c1bfd2ab140e3a248ddcc6c2106978fbf2c1c18a7aada930a37a",
+      "license": "MIT",
+      "license_file": "plotly/LICENSE",
+      "upstream_sha256": "4ac841837b31c1bfd2ab140e3a248ddcc6c2106978fbf2c1c18a7aada930a37a",
+      "modification": null
+    },
+    {
+      "path": "plotly/LICENSE",
+      "package": "plotly.js-strict-dist-min",
+      "version": "4.1.1",
+      "source_url": "https://registry.npmjs.org/plotly.js-strict-dist-min/-/plotly.js-strict-dist-min-4.1.1.tgz",
+      "source_path": "package/LICENSE",
+      "sha256": "8c45d9eaf50c2f72dd9c7ab9ef440788ba58a3538484b5c51c1f17d5128752e7",
+      "license": "MIT",
+      "license_file": "plotly/LICENSE",
+      "upstream_sha256": "8c45d9eaf50c2f72dd9c7ab9ef440788ba58a3538484b5c51c1f17d5128752e7",
+      "modification": null
+    }
+  ]
+}

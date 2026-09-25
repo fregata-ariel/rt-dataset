@@ -48,6 +48,7 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.viewer.jobs",
     "plateau_rt.viewer.__main__",
     "plateau_rt.viewer.api.routes_jobs",
+    "plateau_rt.viewer.api.static_assets",
 ]
 
 

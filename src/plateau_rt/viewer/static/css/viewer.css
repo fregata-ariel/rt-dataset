@@ -1,0 +1,170 @@
+:root {
+  color-scheme: light;
+}
+
+body {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  margin: 0;
+  color: #222;
+  background: #fff;
+}
+
+.viewer-header {
+  border-bottom: 1px solid #ddd;
+  padding: 0.6rem 1rem;
+  background: #f7f7f7;
+}
+
+.viewer-header a {
+  color: inherit;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.viewer-main {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid #ddd;
+  margin-bottom: 1rem;
+}
+
+button.tab {
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: none;
+  padding: 0.4rem 0.8rem;
+  cursor: pointer;
+  font: inherit;
+}
+
+button.tab.active {
+  border-color: #ddd;
+  background: #fff;
+  font-weight: 600;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5rem 0 1.5rem;
+}
+
+th,
+td {
+  border: 1px solid #ddd;
+  padding: 0.3rem 0.6rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+tbody tr:nth-child(even) {
+  background: #fafafa;
+}
+
+tr.selected {
+  background: #e3f0ff;
+}
+
+table.pairs tbody tr {
+  cursor: pointer;
+}
+
+.status {
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 0.8rem 1rem;
+  margin: 1rem 0;
+}
+
+.status.loading {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.status.empty {
+  color: #666;
+}
+
+.status.error {
+  border-color: #c00;
+}
+
+pre.message {
+  white-space: pre-wrap;
+  background: #f7f7f7;
+  padding: 0.5rem;
+  overflow-wrap: break-word;
+}
+
+.spinner {
+  width: 1rem;
+  height: 1rem;
+  border: 2px solid #ccc;
+  border-top-color: #333;
+  border-radius: 50%;
+  animation: viewer-spin 0.8s linear infinite;
+}
+
+@keyframes viewer-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.dropzone {
+  border: 2px dashed #bbb;
+  border-radius: 4px;
+  padding: 1.5rem;
+  text-align: center;
+  margin: 0.5rem 0;
+}
+
+.dropzone.dragover {
+  border-color: #333;
+  background: #f0f0f0;
+}
+
+progress {
+  width: 100%;
+}
+
+.bundle-header,
+.member-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.notice {
+  border: 1px solid #ca0;
+  background: #ffe;
+  padding: 0.5rem 0.8rem;
+  margin-bottom: 1rem;
+}
+
+.upload-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  margin: 0.5rem 0;
+}
+
+.upload-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.upload-progress {
+  margin: 0.5rem 0;
+}

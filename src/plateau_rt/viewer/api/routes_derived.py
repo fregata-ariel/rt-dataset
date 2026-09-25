@@ -105,7 +105,7 @@ def derived_payload(digest: str, result: DerivedResult) -> dict[str, Any]:
     }
 
 
-def _matches_etag(header: str | None, etag: str) -> bool:
+def matches_etag(header: str | None, etag: str) -> bool:
     """Return True when an If-None-Match header matches ``etag`` or ``*``."""
     if header is None:
         return False
@@ -271,7 +271,7 @@ def get_derived_file(
     except OSError as exc:
         raise ApiError(404, "not_found", f"unknown derived file {name!r}", member) from exc
     etag = f'"{entry["sha256"]}"'
-    if _matches_etag(request.headers.get("if-none-match"), etag):
+    if matches_etag(request.headers.get("if-none-match"), etag):
         return Response(status_code=304, headers={"ETag": etag, "Cache-Control": CACHE})
     return FileResponse(
         path,

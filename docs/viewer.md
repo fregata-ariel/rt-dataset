@@ -323,8 +323,9 @@ All routes are under `/api` except the static hook. Errors always use the envelo
 | `GET` | `/api/jobs/{job_id}` | 200 | One job row plus `status_url` and (when `done`) `result`. |
 | `GET` | `/api/bundles/{digest}/status` | 200 | `digest`, `complete`, `eager` counts, `items` and `failures`. |
 | `GET` | `.../derived/{deriver}/v{version}/{params_key}/{links_key}/{name}` | 200 / 304 | One derived file with `ETag`, immutable cache, conditional `If-None-Match`. |
-| `GET` | `/` | 200 | `index.html` when a frontend is installed, else a plain-text pointer. |
-| `GET` | `/static/...` | 200 | Mounted only when the static directory exists. |
+| `GET` | `/` | 200 | `index.html` with `no-cache`, or a plain-text pointer when no frontend is installed. |
+| `GET` | `/static/<build>/...` | 200 | One snapshotted frontend file with `public, max-age=31536000, immutable`. |
+| `GET` | `/static/<path>` | 200 | Unversioned frontend file (tests and debugging) with `no-cache`. |
 
 Upload rules. The body is the raw archive (`zip`, `tar`, `tar.gz`), **not** multipart:
 `python-multipart` would spool the body to `/tmp`, double the disk use and only check the size
@@ -398,7 +399,8 @@ included).
 | `plateau_rt.viewer.jobs` | Background job manager (`spawn` children, limits, dedup, recovery). |
 | `plateau_rt.viewer.__main__` | Headless `serve`/`ingest`/`derive` command line. |
 | `plateau_rt.viewer.api` | FastAPI app factory, error envelope, bundle, derived and job routes. |
-| `plateau_rt.viewer.static` | Frontend assets (V0-6, #41); absent until then. |
+| `plateau_rt.viewer.api.static_assets` | Build-hashed static snapshot served at `/` and `/static/...` (see "Frontend"). |
+| `plateau_rt.viewer.static` | Frontend assets (V0-6, #41): `index.html`, `css/viewer.css`, `js/` modules, `vendor/`. |
 | `plateau_rt.viewer.testing` | Determinism and golden helpers for tests. |
 
 Data flow: upload (`PUT /api/bundles/upload`) -> streamed into `staging/<uuid>.upload` ->
@@ -429,6 +431,103 @@ go to stdout. `serve` logs through uvicorn.
 the digest is unknown; it exits 0 when the only non-`done` results are skipped. A deriver with a
 **range** parameter (`int`/`float`) cannot be enumerated, so `--all-lazy` reports it as `skipped`
 rather than deriving it. Without `--all-lazy`, lazy derivers are not enumerated at all.
+
+## Frontend
+
+The browser frontend (V0-6, #41) is plain ES modules loaded directly by the browser: no bundler,
+no build step, no framework, no Node toolchain. `index.html` references
+`/static/__BUILD__/css/viewer.css` and `/static/__BUILD__/js/app.js` (a `type="module"` script);
+the backend replaces `__BUILD__` with the build id, so every relative ES-module import resolves
+under the same `/static/<build>/` prefix automatically. JavaScript never hard-codes `/static/`
+paths: to address another static file it uses `new URL("../vendor/...", import.meta.url)`.
+
+Files and roles:
+
+| File | Role |
+|---|---|
+| `static/index.html` | Shell: `#app` root, stylesheet and module script, `noscript` fallback. |
+| `static/css/viewer.css` | Neutral styles: layout, header, tabs, tables, status boxes, dropzone. |
+| `static/js/app.js` | Hash router: header, route rendering, panel mounting, `window.__viewer` hook. |
+| `static/js/api.js` | API wrapper: `ApiError`, requests, uploads, job polling, derivation helpers. |
+| `static/js/npy.js` | Pure `.npy` parser (`float16`/`float32`/`int32`/`uint8`/`uint32`/`bool`). |
+| `static/js/state.js` | Hash parsing/formatting and the router store. |
+| `static/js/dom.js` | `h()` element builder, `escapeHtml`, and the shared status views. |
+| `static/js/strings.js` | Every user-visible English string plus the `fmt` template helper. |
+| `static/js/format.js` | Display formatting only (bytes, Hz, ns, numbers, energies, vectors). |
+| `static/js/vendor.js` | `vendorUrl` plus the lazy three.js/Plotly loaders used by later panels. |
+| `static/js/panels/registry.js` | Panel list in tab order, `panelsForKind` and `getPanel`. |
+| `static/js/panels/bundles.js` | Home panel: upload box and bundle list with delete. |
+| `static/js/panels/overview.js` | Overview panel for `rf_dataset` members. |
+
+Hash format (shareable link, V0-D1 #27): home is `#/` (also for an empty hash or anything
+unrecognised); a bundle is `#/b/<digest>[/<member>[/<panel>]]?v=1&...` where `<member>` and
+`<panel>` are optional (default member/panel when absent). `digest` must be 64 lowercase hex
+chars, member `[A-Za-z0-9_.-]{1,64}` and panel `[a-z][a-z0-9_-]{0,63}`; anything else is the
+`invalid` route. The selection shared by all panels:
+
+| Key | URL param | Type | Default |
+|---|---|---|---|
+| `view` | `view` | id string (1..200 chars, no control chars) | `null` |
+| `bs` | `bs` | id string | `null` |
+| `hemisphere` | `hemi` | `front`/`back` | `"front"` |
+| `orientation` | `orient` | `rf`/`photo` | `"rf"` |
+| `path` | `path` | integer >= 0 | `null` |
+| `pixel` | `px` | `[row, col]` integers >= 0, URL form `row,col` | `null` |
+| `delayBin` | `dbin` | integer >= 0 | `null` |
+| `variant` | `variant` | id string | `null` |
+
+`v=1` marks the format version; defaults are never written, invalid values keep their default and
+unknown params are ignored. `parseHash(formatHash(route, state))` round-trips, and formatting a
+parsed canonical hash returns it unchanged. A `v` other than 1 still parses but shows a notice
+(compat is V1-11).
+
+API wrapper (`js/api.js`). Failures throw `ApiError` with `{type, member, message}` from the error
+envelope (plus `status`, and `reason`/`jobId` for failed jobs). Every request other than
+`GET`/`HEAD` sends `X-Viewer-Request: 1`. Uploads use `XMLHttpRequest` with progress callbacks
+(`uploading`, then `validating` once the body is in) and resolve with the parsed JSON on 200/201.
+A 202 derivation answer is polled with `nextPollDelay` backoff (0.5 s growing to a 5 s cap) until
+the job is `done` (returning its `result`) or `failed` (throwing `derive_failed` with the reason).
+Failures are sticky: the derive route keeps pointing at the failed job until the client POSTs
+`retry`, which the overview panel exposes as a Retry button.
+
+DOM rules. Elements are built with `h()` from `dom.js`, which sets attributes, `dataset`, `style`
+objects and `on*` listeners and turns every data string into a text node; `innerHTML`,
+`outerHTML`, `insertAdjacentHTML`, `document.write`, `eval`, `new Function` and inline event
+handlers are forbidden, and `index.html` has no inline `<script>` or `<style>`. Errors render with
+`errorView`, which keeps `ManifestError` newlines verbatim in a `pre.message`. All user-visible
+English strings live in `strings.js` (templates use `{name}` placeholders filled by `fmt`); panel
+files contain no English sentences. `npy.js` parses `.npy` 1.0/2.0 headers with strict regexes (no
+eval) into `float16` (decoded through a lookup table), `float32`, `int32`, `uint32`, `uint8` and
+`bool` arrays, C order only. JavaScript never computes physics or conventions (orientation,
+mirroring, hemisphere, markers, delay wrap, gauge, energies): it only draws backend values, plus
+unit formatting (`12.5 ns`, `3.5 GHz`, `1.2 MiB`) through `format.js`. `window.__viewer` exposes
+`{store, api, parseHash, formatHash, parseNpy}` as a test hook for browser smoke tests.
+
+Caching. `/` serves the templated `index.html` with `Cache-Control: no-cache`.
+`/static/<build>/...` serves the startup snapshot with
+`Cache-Control: public, max-age=31536000, immutable` and an `ETag` (`If-None-Match` answers 304);
+`build` is 12 lowercase hex chars of the sha256 over all static files, and `index.html` carries
+the `__BUILD__` placeholder. The unversioned `/static/<path>` form is `no-cache` for tests and
+debugging. Lookups are dictionary lookups only, so `..`, encoded dots, absolute paths and NUL
+bytes can never reach the disk, and `index.html` is only served at `/`.
+
+Vendor. `static/vendor/` holds third-party files served under `/static/<build>/vendor/`:
+three.js 0.186.1 ships no minified build any more, so the unminified `three.module.js` plus
+`three.core.js` are vendored; `OrbitControls.js` has its `'three'` import rewritten to
+`./three.module.js` because an import map would need an inline script exception in the CSP;
+Plotly uses the `plotly.js-strict-dist-min` 4.1.1 bundle, which avoids `eval`-style code for the
+CSP. `VENDOR.json` records each file's `package`, `version`, `source_url`, `source_path`,
+`sha256`, `upstream_sha256`, `license` and `license_file` (itself listed). To update a vendor
+file: download the npm tarball at `source_url`, copy `source_path` to `path`, re-apply the
+recorded `modification`, and refresh `sha256`/`upstream_sha256`.
+
+### Adding a slice (frontend)
+
+1. Write `static/js/panels/<id>.js` exporting the panel object (`{id, title, kinds, mount, update,
+   unmount}`).
+2. Add one line to `PANELS` in `panels/registry.js`.
+3. Add one `(panel_id, state)` case to the browser smoke test of V0-8 (#43).
+4. Put new UI strings in `strings.js`.
 
 ## Adding a slice (backend)
 
