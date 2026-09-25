@@ -2,19 +2,24 @@
 
 Writes small, self-consistent schema v2/v3 datasets (manifest plus the
 payload files the typed reader resolves) with deterministic random aperture
-CFRs. This is a plain helper module, not a test file, and will be reused by
-other test files later.
+CFRs by default. Callers may instead supply the aperture CFRs, the derived
+per-BS images and the path-geometry ground truth, so the same writer also
+backs the physically consistent viewer fixtures. This is a plain helper
+module, not a test file, and will be reused by other test files later.
 """
 
 from __future__ import annotations
 
+import io
 import json
-from collections.abc import Sequence
+import zipfile
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from plateau_rt.application.rf_dataset_manifest import PER_BS_ARTIFACT_KEYS
 from plateau_rt.domain.rf_camera.calibration import geometric_los_source_direction_local
 from plateau_rt.domain.rf_camera.camera import (
     HEMISPHERES,
@@ -38,6 +43,25 @@ BANDWIDTH_HZ = 100e6
 TARGET_M = (5.0, 5.0, 5.0)
 BS_POSITIONS_M = ((-50.0, -50.0, 30.0), (60.0, 35.0, 25.0))
 FFT_ROWS = FFT_COLS = 16
+
+# A per-(view, BS) artifact producer: returns every ``PER_BS_ARTIFACT_KEYS``.
+DeriveFn = Callable[[int, int, np.ndarray], Mapping[str, np.ndarray | bytes]]
+
+
+def save_npz_deterministic(path: Path, arrays: Mapping[str, np.ndarray]) -> None:
+    """Write ``arrays`` as a compressed ``.npz`` whose bytes depend only on the arrays.
+
+    ``numpy.savez_compressed`` stamps the current time into the zip entries, so
+    two builds differ in bytes. This writer pins every entry timestamp to the
+    zip epoch and serialises each array with ``numpy.lib.format.write_array``.
+    """
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, value in arrays.items():
+            info = zipfile.ZipInfo(f"{name}.npy", date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            buffer = io.BytesIO()
+            np.lib.format.write_array(buffer, np.asanyarray(value), allow_pickle=False)
+            archive.writestr(info, buffer.getvalue())
 
 
 def centred_frequency_offsets(num_bins: int, bandwidth_hz: float = BANDWIDTH_HZ) -> np.ndarray:
@@ -77,15 +101,15 @@ def _hemisphere_energy(aperture_bs: np.ndarray) -> dict[str, float]:
     }
 
 
-def _write_camera_model(root: Path) -> None:
-    """Write ``camera_model.npz`` with a 16x16 direction-cosine grid."""
+def _write_camera_model(root: Path, *, fft_rows: int = FFT_ROWS, fft_cols: int = FFT_COLS) -> None:
+    """Write ``camera_model.npz`` with a deterministic direction-cosine grid."""
     model = build_direction_cosine_camera_model(
-        fft_rows=FFT_ROWS,
-        fft_cols=FFT_COLS,
+        fft_rows=fft_rows,
+        fft_cols=fft_cols,
         horizontal_spacing_lambda=0.5,
         vertical_spacing_lambda=0.5,
     )
-    np.savez_compressed(root / "camera_model.npz", **model)
+    save_npz_deterministic(root / "camera_model.npz", model)
 
 
 def _write_path_geometry_gt(
@@ -98,22 +122,28 @@ def _write_path_geometry_gt(
     bs_ids: Sequence[str],
     view_ids: Sequence[str],
     write_schema: bool,
+    arrays: Mapping[str, np.ndarray] | None = None,
+    object_names: Sequence[str] = ("mock_building",),
+    carrier_hz: float = CARRIER_HZ,
 ) -> None:
-    """Write a small canonical ``path_geometry_gt.npz`` and, optionally, its schema."""
-    arrays = {
-        "valid": np.ones((num_views, num_bs, 2), dtype=bool),
-        "tau": np.zeros((num_views, num_bs, 2), dtype=np.float32),
-        "a_baseband": np.zeros((num_views, num_bs, 2, rows, cols, 2), dtype=np.complex64),
-        "num_interactions": np.zeros((num_views, num_bs, 2), dtype=np.int32),
-    }
-    np.savez_compressed(root / PATH_GEOMETRY_GT_FILE_NAME, **arrays)
+    """Write canonical ``path_geometry_gt.npz`` (supplied or dummy) and its schema."""
+    if arrays is None:
+        resolved = {
+            "valid": np.ones((num_views, num_bs, 2), dtype=bool),
+            "tau": np.zeros((num_views, num_bs, 2), dtype=np.float32),
+            "a_baseband": np.zeros((num_views, num_bs, 2, rows, cols, 2), dtype=np.complex64),
+            "num_interactions": np.zeros((num_views, num_bs, 2), dtype=np.int32),
+        }
+    else:
+        resolved = dict(arrays)
+    save_npz_deterministic(root / PATH_GEOMETRY_GT_FILE_NAME, resolved)
     if not write_schema:
         return
     schema = build_path_schema(
-        arrays,
+        resolved,
         mode=PATH_GT_MODE_CANONICAL,
-        object_names=["mock_building"],
-        carrier_frequency_hz=CARRIER_HZ,
+        object_names=list(object_names),
+        carrier_frequency_hz=carrier_hz,
         bs_ids=bs_ids,
         view_ids=view_ids,
     )
@@ -136,6 +166,65 @@ def _bs_geometry(bs_position: tuple[float, float, float], *, view: Any) -> tuple
     return [float(v) for v in bs_local], bool(bs_local[0] >= 0.0)
 
 
+def _bs_artifact_paths(view_id: str, bs_id: str) -> dict[str, str]:
+    """Return the relative artifact paths of one (view, BS) entry (writer layout)."""
+    prefix = f"views/{view_id}/rf/{bs_id}"
+    return {
+        "angular_cfr_center": f"{prefix}/angular_cfr_center.npy",
+        "angular_power_center": f"{prefix}/angular_power_center.npy",
+        "phase_valid_mask": f"{prefix}/phase_valid_mask.npy",
+        "dominant_delay_s": f"{prefix}/dominant_delay_s.npy",
+        "dominant_delay_power": f"{prefix}/dominant_delay_power.npy",
+        "debug_power_png": f"{prefix}/angular_power_center.png",
+    }
+
+
+def _write_derived_artifacts(
+    root: Path,
+    artifacts: Mapping[str, str],
+    derived: Mapping[str, np.ndarray | bytes] | None,
+) -> None:
+    """Write per-BS derived artifacts, either placeholders or a supplied mapping."""
+    if derived is None:
+        # Placeholders cover the .npy artifacts only; the debug PNG is not written.
+        for key in PER_BS_ARTIFACT_KEYS:
+            if artifacts[key].endswith(".npy"):
+                _write_placeholder_npy(root / artifacts[key])
+        return
+    missing = [key for key in PER_BS_ARTIFACT_KEYS if key not in derived]
+    if missing:
+        raise ValueError(f"derive mapping is missing artifact key(s): {missing}")
+    for name in PER_BS_ARTIFACT_KEYS:
+        path = root / artifacts[name]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        value = derived[name]
+        if name == "debug_power_png":
+            if not isinstance(value, (bytes, bytearray)):
+                raise ValueError(f"derive mapping key {name!r} must be bytes, got {type(value)!r}")
+            path.write_bytes(bytes(value))
+        else:
+            np.save(path, np.asarray(value))
+
+
+def _resolve_apertures(
+    apertures: np.ndarray | None,
+    *,
+    num_views: int,
+    expected_shape: tuple[int, ...],
+    random_shape: tuple[int, ...],
+    seed: int,
+) -> np.ndarray:
+    """Return the supplied aperture CFRs (validated) or deterministic random ones."""
+    if apertures is None:
+        return np.stack(
+            [_random_aperture(random_shape, seed + view_index) for view_index in range(num_views)]
+        )
+    resolved = np.asarray(apertures)
+    if resolved.shape != expected_shape:
+        raise ValueError(f"apertures must have shape {expected_shape}, got {resolved.shape}")
+    return resolved.astype(np.complex64, copy=False)
+
+
 def write_v3_dataset(
     root: Path,
     *,
@@ -147,27 +236,56 @@ def write_v3_dataset(
     seed: int = 0,
     views: Sequence[RFViewSpec] | None = None,
     source_scene: str = "mock_scene.xml",
+    bs_positions: Sequence[tuple[float, float, float]] | None = None,
+    bs_look_at: tuple[float, float, float] = TARGET_M,
+    carrier_hz: float = CARRIER_HZ,
+    bandwidth_hz: float = BANDWIDTH_HZ,
+    fft_rows: int = FFT_ROWS,
+    fft_cols: int = FFT_COLS,
+    apertures: np.ndarray | None = None,
+    derive: DeriveFn | None = None,
+    path_gt_arrays: Mapping[str, np.ndarray] | None = None,
+    path_gt_object_names: Sequence[str] = ("mock_building",),
+    write_path_gt: bool = True,
 ) -> dict[str, Any]:
     """Write a synthetic schema v3 dataset under ``root`` and return its manifest."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
-    offsets = centred_frequency_offsets(bins)
-    bs_positions = _resolve_bs_positions(num_bs)
+    offsets = centred_frequency_offsets(bins, bandwidth_hz)
+    if bs_positions is not None:
+        resolved_positions = [
+            (float(position[0]), float(position[1]), float(position[2]))
+            for position in bs_positions
+        ]
+        num_bs = len(resolved_positions)
+    else:
+        resolved_positions = _resolve_bs_positions(num_bs)
     bs_ids = [f"bs_{index:03d}" for index in range(num_bs)]
     views = _resolve_views(views, num_views)
     num_views = len(views)
-
-    _write_camera_model(root)
-    _write_path_geometry_gt(
-        root,
+    aperture = _resolve_apertures(
+        apertures,
         num_views=num_views,
-        num_bs=num_bs,
-        rows=rows,
-        cols=cols,
-        bs_ids=bs_ids,
-        view_ids=[view.view_id for view in views],
-        write_schema=True,
+        expected_shape=(num_views, num_bs, 2, rows, cols, bins),
+        random_shape=(num_bs, 2, rows, cols, bins),
+        seed=seed,
     )
+
+    _write_camera_model(root, fft_rows=fft_rows, fft_cols=fft_cols)
+    if write_path_gt:
+        _write_path_geometry_gt(
+            root,
+            num_views=num_views,
+            num_bs=num_bs,
+            rows=rows,
+            cols=cols,
+            bs_ids=bs_ids,
+            view_ids=[view.view_id for view in views],
+            write_schema=True,
+            arrays=path_gt_arrays,
+            object_names=path_gt_object_names,
+            carrier_hz=carrier_hz,
+        )
 
     manifest_views: list[dict[str, Any]] = []
     for view_index, view in enumerate(views):
@@ -177,31 +295,21 @@ def write_v3_dataset(
         (view_dir / "pose.json").write_text(
             json.dumps(view_pose_payload(view), indent=2), encoding="utf-8"
         )
-        aperture = _random_aperture((num_bs, 2, rows, cols, bins), seed + view_index)
-        np.save(rf_dir / "aperture_cfr.npy", aperture)
+        np.save(rf_dir / "aperture_cfr.npy", aperture[view_index].astype(np.complex64))
 
         bs_entries: list[dict[str, Any]] = []
-        for bs_index, (bs_id, bs_position) in enumerate(zip(bs_ids, bs_positions)):
+        for bs_index, (bs_id, bs_position) in enumerate(zip(bs_ids, resolved_positions)):
             direction, in_front = _bs_geometry(bs_position, view=view)
-            artifacts = {
-                "angular_cfr_center": f"views/{view.view_id}/rf/{bs_id}/angular_cfr_center.npy",
-                "angular_power_center": f"views/{view.view_id}/rf/{bs_id}/angular_power_center.npy",
-                "phase_valid_mask": f"views/{view.view_id}/rf/{bs_id}/phase_valid_mask.npy",
-                "dominant_delay_s": f"views/{view.view_id}/rf/{bs_id}/dominant_delay_s.npy",
-                "dominant_delay_power": (
-                    f"views/{view.view_id}/rf/{bs_id}/dominant_delay_power.npy"
-                ),
-                "debug_power_png": f"views/{view.view_id}/rf/{bs_id}/angular_power_center.png",
-            }
-            for name, relative in artifacts.items():
-                if relative.endswith(".npy"):
-                    _write_placeholder_npy(root / relative)
+            artifacts = _bs_artifact_paths(view.view_id, bs_id)
+            aperture_bs = aperture[view_index, bs_index]
+            derived = None if derive is None else derive(view_index, bs_index, aperture_bs)
+            _write_derived_artifacts(root, artifacts, derived)
             bs_entries.append(
                 {
                     "bs_id": bs_id,
                     "bs_direction_local": direction,
                     "bs_in_front_hemisphere": in_front,
-                    "hemisphere_energy": _hemisphere_energy(aperture[bs_index]),
+                    "hemisphere_energy": _hemisphere_energy(aperture_bs),
                     "artifacts": artifacts,
                 }
             )
@@ -224,11 +332,11 @@ def write_v3_dataset(
         "mode": "multibs_multiue_rf_camera_dataset",
         "source_scene": source_scene,
         "config": {
-            "carrier_frequency_hz": CARRIER_HZ,
-            "bandwidth_hz": BANDWIDTH_HZ,
+            "carrier_frequency_hz": carrier_hz,
+            "bandwidth_hz": bandwidth_hz,
             "num_frequency_bins": bins,
-            "tx_positions": [list(position) for position in bs_positions],
-            "tx_look_at": list(TARGET_M),
+            "tx_positions": [list(position) for position in resolved_positions],
+            "tx_look_at": list(bs_look_at),
             "tx_look_ats": None,
             "rx_rows": rows,
             "rx_cols": cols,
@@ -236,25 +344,25 @@ def write_v3_dataset(
             "horizontal_spacing_lambda": 0.5,
             "tx_pattern": "tr38901",
             "polarization": "V",
-            "fft_rows": FFT_ROWS,
-            "fft_cols": FFT_COLS,
+            "fft_rows": fft_rows,
+            "fft_cols": fft_cols,
             "phase_floor_db": -35.0,
             "max_depth": 5,
             "synthetic_array": True,
             "seed": seed,
         },
         "frequency_offsets_hz": offsets.tolist(),
-        "absolute_frequencies_hz": (CARRIER_HZ + offsets).tolist(),
-        "delay_resolution_s": 1.0 / BANDWIDTH_HZ,
-        "unambiguous_delay_s": bins / BANDWIDTH_HZ,
+        "absolute_frequencies_hz": (carrier_hz + offsets).tolist(),
+        "delay_resolution_s": 1.0 / bandwidth_hz,
+        "unambiguous_delay_s": bins / bandwidth_hz,
         "base_stations": [
             {
                 "bs_id": bs_id,
                 "index": index,
                 "position_m": list(position),
-                "look_at_m": list(TARGET_M),
+                "look_at_m": list(bs_look_at),
             }
-            for index, (bs_id, position) in enumerate(zip(bs_ids, bs_positions))
+            for index, (bs_id, position) in enumerate(zip(bs_ids, resolved_positions))
         ],
         "raw_observation": {
             "artifact": "aperture_cfr",
@@ -284,10 +392,11 @@ def write_v3_dataset(
                 "behind an optical camera."
             ),
         },
-        "path_geometry_gt": PATH_GEOMETRY_GT_FILE_NAME,
-        "path_schema": PATH_SCHEMA_FILE_NAME,
         "views": manifest_views,
     }
+    if write_path_gt:
+        manifest["path_geometry_gt"] = PATH_GEOMETRY_GT_FILE_NAME
+        manifest["path_schema"] = PATH_SCHEMA_FILE_NAME
     (root / "dataset_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
 
@@ -302,26 +411,54 @@ def write_v2_dataset(
     seed: int = 0,
     views: Sequence[RFViewSpec] | None = None,
     source_scene: str = "mock_scene.xml",
+    bs_position: tuple[float, float, float] | None = None,
+    bs_look_at: tuple[float, float, float] = TARGET_M,
+    carrier_hz: float = CARRIER_HZ,
+    bandwidth_hz: float = BANDWIDTH_HZ,
+    fft_rows: int = FFT_ROWS,
+    fft_cols: int = FFT_COLS,
+    apertures: np.ndarray | None = None,
+    derive: DeriveFn | None = None,
+    path_gt_arrays: Mapping[str, np.ndarray] | None = None,
+    path_gt_object_names: Sequence[str] = ("mock_building",),
+    write_path_gt: bool = True,
+    write_path_schema: bool = False,
 ) -> dict[str, Any]:
     """Write a synthetic schema v2 (single-BS) dataset under ``root``."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
-    offsets = centred_frequency_offsets(bins)
-    bs_position = BS_POSITIONS_M[0]
+    offsets = centred_frequency_offsets(bins, bandwidth_hz)
+    source_position = BS_POSITIONS_M[0] if bs_position is None else bs_position
+    resolved_position = (
+        float(source_position[0]),
+        float(source_position[1]),
+        float(source_position[2]),
+    )
     views = _resolve_views(views, num_views)
     num_views = len(views)
-
-    _write_camera_model(root)
-    _write_path_geometry_gt(
-        root,
+    aperture = _resolve_apertures(
+        apertures,
         num_views=num_views,
-        num_bs=1,
-        rows=rows,
-        cols=cols,
-        bs_ids=["bs_000"],
-        view_ids=[view.view_id for view in views],
-        write_schema=False,
+        expected_shape=(num_views, 2, rows, cols, bins),
+        random_shape=(2, rows, cols, bins),
+        seed=seed,
     )
+
+    _write_camera_model(root, fft_rows=fft_rows, fft_cols=fft_cols)
+    if write_path_gt:
+        _write_path_geometry_gt(
+            root,
+            num_views=num_views,
+            num_bs=1,
+            rows=rows,
+            cols=cols,
+            bs_ids=["bs_000"],
+            view_ids=[view.view_id for view in views],
+            write_schema=write_path_schema,
+            arrays=path_gt_arrays,
+            object_names=path_gt_object_names,
+            carrier_hz=carrier_hz,
+        )
 
     manifest_views: list[dict[str, Any]] = []
     for view_index, view in enumerate(views):
@@ -331,22 +468,16 @@ def write_v2_dataset(
         (view_dir / "pose.json").write_text(
             json.dumps(view_pose_payload(view), indent=2), encoding="utf-8"
         )
-        aperture = _random_aperture((2, rows, cols, bins), seed + view_index)
-        np.save(rf_dir / "aperture_cfr.npy", aperture)
-        direction, in_front = _bs_geometry(bs_position, view=view)
+        aperture_view = aperture[view_index].astype(np.complex64)
+        np.save(rf_dir / "aperture_cfr.npy", aperture_view)
+        direction, in_front = _bs_geometry(resolved_position, view=view)
         artifacts = {
             "pose": f"views/{view.view_id}/pose.json",
             "aperture_cfr": f"views/{view.view_id}/rf/aperture_cfr.npy",
-            "angular_cfr_center": f"views/{view.view_id}/rf/angular_cfr_center.npy",
-            "angular_power_center": f"views/{view.view_id}/rf/angular_power_center.npy",
-            "phase_valid_mask": f"views/{view.view_id}/rf/phase_valid_mask.npy",
-            "dominant_delay_s": f"views/{view.view_id}/rf/dominant_delay_s.npy",
-            "dominant_delay_power": f"views/{view.view_id}/rf/dominant_delay_power.npy",
-            "debug_power_png": f"views/{view.view_id}/rf/angular_power_center.png",
         }
-        for name, relative in artifacts.items():
-            if relative.endswith(".npy") and name not in ("aperture_cfr",):
-                _write_placeholder_npy(root / relative)
+        artifacts.update(_bs_artifact_paths(view.view_id, "bs_000"))
+        derived = None if derive is None else derive(view_index, 0, aperture_view)
+        _write_derived_artifacts(root, artifacts, derived)
         manifest_views.append(
             {
                 "view_id": view.view_id,
@@ -355,7 +486,7 @@ def write_v2_dataset(
                 "orientation_rad": list(view.orientation),
                 "bs_direction_local": direction,
                 "bs_in_front_hemisphere": in_front,
-                "hemisphere_energy": _hemisphere_energy(aperture),
+                "hemisphere_energy": _hemisphere_energy(aperture_view),
                 "artifacts": artifacts,
             }
         )
@@ -365,28 +496,28 @@ def write_v2_dataset(
         "mode": "1bs_multiue_rf_camera_dataset",
         "source_scene": source_scene,
         "config": {
-            "carrier_frequency_hz": CARRIER_HZ,
-            "bandwidth_hz": BANDWIDTH_HZ,
+            "carrier_frequency_hz": carrier_hz,
+            "bandwidth_hz": bandwidth_hz,
             "num_frequency_bins": bins,
-            "tx_position": list(bs_position),
-            "tx_look_at": list(TARGET_M),
+            "tx_position": list(resolved_position),
+            "tx_look_at": list(bs_look_at),
             "rx_rows": rows,
             "rx_cols": cols,
             "vertical_spacing_lambda": 0.5,
             "horizontal_spacing_lambda": 0.5,
             "tx_pattern": "tr38901",
             "polarization": "V",
-            "fft_rows": FFT_ROWS,
-            "fft_cols": FFT_COLS,
+            "fft_rows": fft_rows,
+            "fft_cols": fft_cols,
             "phase_floor_db": -35.0,
             "max_depth": 5,
             "synthetic_array": True,
             "seed": seed,
         },
         "frequency_offsets_hz": offsets.tolist(),
-        "absolute_frequencies_hz": (CARRIER_HZ + offsets).tolist(),
-        "delay_resolution_s": 1.0 / BANDWIDTH_HZ,
-        "unambiguous_delay_s": bins / BANDWIDTH_HZ,
+        "absolute_frequencies_hz": (carrier_hz + offsets).tolist(),
+        "delay_resolution_s": 1.0 / bandwidth_hz,
+        "unambiguous_delay_s": bins / bandwidth_hz,
         "raw_observation": {
             "artifact": "aperture_cfr",
             "axis_order": ["hemisphere", "row", "col", "frequency_offset"],
@@ -414,8 +545,11 @@ def write_v2_dataset(
                 "behind an optical camera."
             ),
         },
-        "path_geometry_gt": "path_geometry_gt.npz",
         "views": manifest_views,
     }
+    if write_path_gt:
+        manifest["path_geometry_gt"] = PATH_GEOMETRY_GT_FILE_NAME
+    if write_path_gt and write_path_schema:
+        manifest["path_schema"] = PATH_SCHEMA_FILE_NAME
     (root / "dataset_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
