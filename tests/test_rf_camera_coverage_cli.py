@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from pathlib import Path
 
@@ -44,16 +45,20 @@ class FakeDataset:
 
 
 def _synthetic_radio_map(xml_path, *, dataset_config, grid, solver):
-    """Return a free-space-like radio map with a box of indoor cells."""
+    """Return a free-space-like radio map with a box of indoor cells and a LoS mask."""
     centers = grid.cell_centers()
     layers = []
-    for _bs_id, position, _look_at in dataset_config.resolve_base_stations():
+    los_layers = []
+    for index, (_bs_id, position, _look_at) in enumerate(dataset_config.resolve_base_stations()):
         dist = np.linalg.norm(centers - np.asarray(position, dtype=np.float64), axis=-1)
         layers.append((LAMBDA_M / (4.0 * np.pi * dist)) ** 2)
+        sign = 1.0 if index == 0 else -1.0
+        los_layers.append((sign * centers[:, :, 0]) >= 0.0)
     gain = np.stack(layers, axis=0).astype(np.float32)
     indoor = (np.abs(centers[:, :, 0]) <= 5.0) & (np.abs(centers[:, :, 1]) <= 5.0)
+    los_mask = np.stack(los_layers, axis=0).astype(bool)
     return radio_map_module.RadioMapResult(
-        path_gain=gain, indoor_mask=indoor.astype(bool), grid=grid
+        path_gain=gain, indoor_mask=indoor.astype(bool), grid=grid, los_mask=los_mask
     )
 
 
@@ -317,3 +322,65 @@ def test_tx_power_dbm_option_is_recorded(scene_xml: Path, tmp_path: Path) -> Non
     )
     assert result.exit_code == 0, result.output
     assert FakeDataset.instances[-1].config.tx_power_dbm == 30.0
+
+
+def test_coverage_los_fraction_quota(scene_xml: Path, tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        cli,
+        _coverage_args(
+            scene_xml,
+            tmp_path / "out",
+            "--los-fraction",
+            "0.5",
+        ),
+    )
+    assert result.exit_code == 0, result.output
+    placement = FakeDataset.instances[-1].placement
+    assert placement["settings"]["los_fraction"] == 0.5
+    los_true = sum(1 for entry in placement["views"] if entry["los"] is True)
+    assert los_true == 2
+
+
+def test_coverage_any_union(scene_xml: Path, tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        cli,
+        _coverage_args(scene_xml, tmp_path / "out", "--bs-aggregation", "any"),
+    )
+    assert result.exit_code == 0, result.output
+    placement = FakeDataset.instances[-1].placement
+    assert placement["multi_bs"]["combine"] == "union"
+
+
+def test_coverage_records_new_defaults(scene_xml: Path, tmp_path: Path) -> None:
+    result = CliRunner().invoke(cli, _coverage_args(scene_xml, tmp_path / "out"))
+    assert result.exit_code == 0, result.output
+    placement = FakeDataset.instances[-1].placement
+    assert placement["radio_map"]["solver"]["samples_per_tx"] == 100000000
+    assert placement["settings"]["threshold"] == {
+        "mode": "relative_to_max_db",
+        "value": 50.0,
+    }
+
+
+def test_coverage_radio_map_reuse_rejects_tx_pattern(scene_xml: Path, tmp_path: Path) -> None:
+    runner = CliRunner()
+    first = runner.invoke(cli, _coverage_args(scene_xml, tmp_path / "first"))
+    assert first.exit_code == 0, first.output
+    radio_map_json = tmp_path / "first" / "placement" / "radio_map.json"
+    metadata = json.loads(radio_map_json.read_text(encoding="utf-8"))
+    metadata["antenna"]["tx_pattern"] = "iso"
+    radio_map_json.write_text(json.dumps(metadata), encoding="utf-8")
+    result = runner.invoke(
+        cli,
+        _coverage_args(scene_xml, tmp_path / "reused", "--radio-map", str(radio_map_json)),
+    )
+    assert result.exit_code != 0
+    assert "tx_pattern" in result.output
+
+
+def test_coverage_rejects_los_fraction_out_of_range(scene_xml: Path, tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        cli,
+        _coverage_args(scene_xml, tmp_path / "out", "--los-fraction", "1.5"),
+    )
+    assert result.exit_code == 2

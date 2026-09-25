@@ -38,7 +38,9 @@ PLACEMENT_DIR = "placement"
 RADIO_MAP_METADATA_FILE = "radio_map.json"
 RADIO_MAP_PATH_GAIN_FILE = "radio_map_path_gain.npy"
 RADIO_MAP_INDOOR_MASK_FILE = "radio_map_indoor_mask.npy"
-RADIO_MAP_FORMAT_VERSION = 1
+RADIO_MAP_LOS_MASK_FILE = "radio_map_los_mask.npy"
+RADIO_MAP_FORMAT_VERSION = 2
+SUPPORTED_RADIO_MAP_FORMAT_VERSIONS = (1, 2)
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,7 @@ class SavedRadioMap:
     grid: RadioMapGrid
     metadata: Mapping[str, Any]
     metadata_path: Path
+    los_mask: np.ndarray | None = None
 
 
 def file_sha256(path: Path) -> str:
@@ -96,16 +99,33 @@ def save_radio_map(
     base_stations: Sequence[Mapping[str, Any]],
     carrier_frequency_hz: float,
     source_scene: str,
+    los_mask: np.ndarray | None = None,
+    tx_pattern: str | None = None,
+    polarization: str | None = None,
 ) -> Path:
     """Write a radio map under ``output_dir/placement/`` and return its json path.
 
     ``base_stations`` entries are ``{"bs_id", "position_m", "look_at_m"}`` in
     transmitter order. ``np.save`` output is byte-deterministic, so the
-    recorded sha256 digests identify the stored array contents.
+    recorded sha256 digests identify the stored array contents. ``los_mask`` is
+    the optional bool ``[num_bs, ny, nx]`` geometric LoS indicator;
+    ``tx_pattern`` / ``polarization`` record the transmit antenna configuration.
     """
     output_dir = Path(output_dir)
     grid.validate()
     _validate_radio_map_arrays(path_gain, indoor_mask, grid, len(base_stations))
+
+    num_bs = int(np.asarray(path_gain).shape[0])
+    los_array: np.ndarray | None = None
+    if los_mask is not None:
+        try:
+            los_array = np.asarray(los_mask, dtype=bool)
+        except (TypeError, ValueError):
+            raise ValueError("los_mask must be bool-castable") from None
+        if los_array.ndim != 3 or tuple(los_array.shape) != (num_bs, *grid.shape):
+            raise ValueError(
+                f"los_mask must have shape {(num_bs, *grid.shape)}, got shape {los_array.shape}"
+            )
 
     placement_dir = output_dir / PLACEMENT_DIR
     placement_dir.mkdir(parents=True, exist_ok=True)
@@ -114,23 +134,32 @@ def save_radio_map(
     np.save(path_gain_path, np.asarray(path_gain, dtype=np.float32))
     np.save(indoor_mask_path, np.asarray(indoor_mask, dtype=bool))
 
+    artifacts = {
+        "path_gain": RADIO_MAP_PATH_GAIN_FILE,
+        "indoor_mask": RADIO_MAP_INDOOR_MASK_FILE,
+    }
+    digests = {
+        "path_gain": file_sha256(path_gain_path),
+        "indoor_mask": file_sha256(indoor_mask_path),
+    }
+    if los_array is not None:
+        los_mask_path = placement_dir / RADIO_MAP_LOS_MASK_FILE
+        np.save(los_mask_path, los_array)
+        artifacts["los_mask"] = RADIO_MAP_LOS_MASK_FILE
+        digests["los_mask"] = file_sha256(los_mask_path)
+
     metadata = {
         "format_version": RADIO_MAP_FORMAT_VERSION,
         "source_scene": str(source_scene),
         "carrier_frequency_hz": float(carrier_frequency_hz),
         "base_stations": [dict(entry) for entry in base_stations],
+        "antenna": {"tx_pattern": tx_pattern, "polarization": polarization},
         "grid": grid.to_dict(),
         "solver": dict(solver),
         "path_gain_axis_order": ["bs", "y", "x"],
         "path_gain_scale": "linear",
-        "artifacts": {
-            "path_gain": RADIO_MAP_PATH_GAIN_FILE,
-            "indoor_mask": RADIO_MAP_INDOOR_MASK_FILE,
-        },
-        "sha256": {
-            "path_gain": file_sha256(path_gain_path),
-            "indoor_mask": file_sha256(indoor_mask_path),
-        },
+        "artifacts": artifacts,
+        "sha256": digests,
     }
     metadata_path = placement_dir / RADIO_MAP_METADATA_FILE
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -172,10 +201,10 @@ def load_radio_map(path: Path) -> SavedRadioMap:
         ) from exc
     if not isinstance(metadata, Mapping):
         raise ValueError(f"radio map metadata {metadata_path} must be a JSON object")
-    if metadata.get("format_version") != RADIO_MAP_FORMAT_VERSION:
+    if metadata.get("format_version") not in SUPPORTED_RADIO_MAP_FORMAT_VERSIONS:
         raise ValueError(
             f"unsupported radio map format_version {metadata.get('format_version')!r} in "
-            f"{metadata_path}; expected {RADIO_MAP_FORMAT_VERSION}"
+            f"{metadata_path}; expected one of {SUPPORTED_RADIO_MAP_FORMAT_VERSIONS}"
         )
     try:
         grid_record = metadata["grid"]
@@ -187,7 +216,9 @@ def load_radio_map(path: Path) -> SavedRadioMap:
 
     placement_dir = metadata_path.parent
     resolved: dict[str, Path] = {}
-    for key in ("path_gain", "indoor_mask"):
+    required = ("path_gain", "indoor_mask")
+    optional = ("los_mask",) if isinstance(artifacts, Mapping) and "los_mask" in artifacts else ()
+    for key in (*required, *optional):
         try:
             relative = artifacts[key]
         except (KeyError, TypeError):
@@ -211,12 +242,20 @@ def load_radio_map(path: Path) -> SavedRadioMap:
     path_gain = np.asarray(path_gain, dtype=np.float32)
     indoor_mask = np.asarray(indoor_mask, dtype=bool)
     _validate_radio_map_arrays(path_gain, indoor_mask, grid, int(path_gain.shape[0]))
+    los_mask: np.ndarray | None = None
+    if "los_mask" in resolved:
+        los_mask = np.load(resolved["los_mask"], allow_pickle=False)
+        los_mask = np.asarray(los_mask, dtype=bool)
+        expected_shape = (int(path_gain.shape[0]), *grid.shape)
+        if tuple(los_mask.shape) != expected_shape:
+            raise ValueError(f"los_mask shape {los_mask.shape} does not match {expected_shape}")
     return SavedRadioMap(
         path_gain=path_gain,
         indoor_mask=indoor_mask,
         grid=grid,
         metadata=metadata,
         metadata_path=metadata_path,
+        los_mask=los_mask,
     )
 
 
@@ -232,7 +271,11 @@ def copy_radio_map(saved: SavedRadioMap, output_dir: Path) -> Path:
     if source_dir.resolve() == destination_dir.resolve():
         return saved.metadata_path
     destination_dir.mkdir(parents=True, exist_ok=True)
-    for name in (RADIO_MAP_METADATA_FILE, RADIO_MAP_PATH_GAIN_FILE, RADIO_MAP_INDOOR_MASK_FILE):
+    names = [RADIO_MAP_METADATA_FILE, RADIO_MAP_PATH_GAIN_FILE, RADIO_MAP_INDOOR_MASK_FILE]
+    artifacts = saved.metadata.get("artifacts")
+    if isinstance(artifacts, Mapping) and "los_mask" in artifacts:
+        names.append(RADIO_MAP_LOS_MASK_FILE)
+    for name in names:
         shutil.copyfile(source_dir / name, destination_dir / name)
     return destination_dir / RADIO_MAP_METADATA_FILE
 
@@ -243,14 +286,30 @@ def check_radio_map_matches(
     carrier_frequency_hz: float,
     base_stations: Sequence[tuple[str, tuple[float, float, float], tuple[float, float, float]]],
     ue_height_m: float,
+    tx_pattern: str | None = None,
+    polarization: str | None = None,
 ) -> None:
     """Check that a saved radio map fits the requested dataset geometry.
 
     Raises ValueError when the carrier, the base stations or the UE height
     differ from the saved map. ``base_stations`` is the output of
-    :meth:`RFMultiViewConfig.resolve_base_stations`.
+    :meth:`RFMultiViewConfig.resolve_base_stations`. When ``tx_pattern`` /
+    ``polarization`` are given they are compared with the recorded ``antenna``
+    block.
     """
     metadata = saved.metadata
+    if tx_pattern is not None or polarization is not None:
+        antenna = metadata.get("antenna")
+        if not isinstance(antenna, Mapping):
+            antenna = {}
+        for name, wanted in (("tx_pattern", tx_pattern), ("polarization", polarization)):
+            if wanted is None:
+                continue
+            recorded = antenna.get(name)
+            if recorded is None or str(recorded) != str(wanted):
+                raise ValueError(
+                    f"radio map {name} {recorded!r} does not match the requested {wanted!r}"
+                )
     recorded_carrier = float(metadata.get("carrier_frequency_hz", float("nan")))
     if not math.isclose(recorded_carrier, float(carrier_frequency_hz), rel_tol=1e-9):
         raise ValueError(
@@ -317,17 +376,21 @@ def placement_manifest_section(
         "min_bs_distance_m": float(settings.min_bs_distance_m),
         "min_ue_spacing_m": float(settings.min_spacing_m),
     }
+    artifacts = {
+        "path_gain": f"{PLACEMENT_DIR}/{RADIO_MAP_PATH_GAIN_FILE}",
+        "indoor_mask": f"{PLACEMENT_DIR}/{RADIO_MAP_INDOOR_MASK_FILE}",
+    }
+    if saved.los_mask is not None:
+        artifacts["los_mask"] = f"{PLACEMENT_DIR}/{RADIO_MAP_LOS_MASK_FILE}"
     record["radio_map"] = {
         "source": radio_map_source,
         "origin": radio_map_origin,
         "metadata": metadata_relative,
-        "artifacts": {
-            "path_gain": f"{PLACEMENT_DIR}/{RADIO_MAP_PATH_GAIN_FILE}",
-            "indoor_mask": f"{PLACEMENT_DIR}/{RADIO_MAP_INDOOR_MASK_FILE}",
-        },
+        "artifacts": artifacts,
         "sha256": dict(saved.metadata["sha256"]),
         "grid": saved.grid.to_dict(),
         "solver": dict(saved.metadata["solver"]),
+        "antenna": dict(saved.metadata.get("antenna") or {}),
     }
     return record
 
@@ -351,6 +414,11 @@ def replan_from_manifest(dataset_dir: Path) -> CoveragePlacement:
         clearance = float(placement["exclusion"]["building_clearance_m"])
     except (KeyError, TypeError) as exc:
         raise ValueError(f"malformed placement section in {dataset_dir}: {exc}") from None
+    if settings.jitter_fraction > 0.0 and int(placement.get("sampler_version", 1)) < 2:
+        raise ValueError(
+            "placement records with a positive jitter_fraction need "
+            "sampler_version >= 2 (they were drawn with the old, jitter-unaware spacing rule)"
+        )
     saved = load_radio_map(dataset_dir / metadata_relative)
     exclusion = building_exclusion_mask(saved.indoor_mask, saved.grid, clearance_m=clearance)
     bs_positions = [tuple(bs.position_m) for bs in manifest.base_stations]
@@ -360,4 +428,5 @@ def replan_from_manifest(dataset_dir: Path) -> CoveragePlacement:
         settings,
         exclusion_mask=exclusion,
         bs_positions=bs_positions,
+        los_mask=saved.los_mask,
     )

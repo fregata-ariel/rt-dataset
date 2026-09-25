@@ -80,7 +80,8 @@ rf-camera-coverage-mock: build-mock
 		--num-views 8 --ue-height-m 1.5 --target 5 5 5 \
 		--bs-position -50 -50 30 --bs-position 60 35 25 \
 		--rm-center 0 0 --rm-size 80 80 --rm-cell-size 1 1 \
-		--pl-threshold-mode relative_to_max_db --pl-threshold 30 \
+		--pl-threshold-mode relative_to_max_db --pl-threshold 30 --bs-aggregation any \
+		--los-reference all --los-fraction 0.5 \
 		--building-clearance-m 1 --min-bs-distance-m 5 --min-ue-spacing-m 5
 
 rf-camera-coverage-mock-city: build-mock-city
@@ -89,7 +90,7 @@ rf-camera-coverage-mock-city: build-mock-city
 		--orientation-policy $(ORIENTATION_POLICY) $(COVERAGE_RADIO_MAP_ARG) \
 		--num-views 12 --ue-height-m 1.5 --target 0 0 8 --bs-position -70 5 25 \
 		--rm-center 0 0 --rm-size 120 120 --rm-cell-size 1 1 \
-		--pl-threshold-mode relative_to_max_db --pl-threshold 30 \
+		--pl-threshold-mode relative_to_max_db --pl-threshold 50 \
 		--building-clearance-m 2 --min-bs-distance-m 10 --min-ue-spacing-m 5
 
 rf-camera-optical-coverage-mock:

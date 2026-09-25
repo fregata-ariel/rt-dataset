@@ -25,9 +25,11 @@ from plateau_rt.application.rf_dataset_manifest import (  # noqa: E402
     ManifestError,
     load_rf_dataset_manifest,
 )
+from plateau_rt.application.rf_tomography_io import los_visibility  # noqa: E402
 from plateau_rt.application.ue_placement import (  # noqa: E402
     PLACEMENT_DIR,
     RADIO_MAP_INDOOR_MASK_FILE,
+    RADIO_MAP_LOS_MASK_FILE,
     RADIO_MAP_PATH_GAIN_FILE,
     building_exclusion_mask,
     file_sha256,
@@ -64,6 +66,9 @@ PLACEMENT_INVARIANT_KEYS = (
     "cell_counts",
     "exclusion",
     "rng",
+    "multi_bs",
+    "los",
+    "sampler_version",
 )
 
 
@@ -101,10 +106,13 @@ def _check_radio_map_hashes(c: cmo.Checker, dataset_dir: Path, placement: Mappin
         return
     manifest_hashes = placement["radio_map"].get("sha256", {})
     metadata_hashes = metadata.get("sha256", {})
-    for key, file_name in (
+    checks = [
         ("path_gain", RADIO_MAP_PATH_GAIN_FILE),
         ("indoor_mask", RADIO_MAP_INDOOR_MASK_FILE),
-    ):
+    ]
+    if "los_mask" in manifest_hashes:
+        checks.append(("los_mask", RADIO_MAP_LOS_MASK_FILE))
+    for key, file_name in checks:
         artifact = placement_dir / file_name
         actual = file_sha256(artifact)
         c.check(
@@ -191,6 +199,7 @@ def _check_cells(c: cmo.Checker, dataset_dir: Path, manifest, placement: Mapping
             exclusion_mask=exclusion,
             bs_positions=bs_positions,
             min_bs_distance_m=settings.min_bs_distance_m,
+            los_mask=saved.los_mask,
         )
     except ValueError as exc:
         c.check(False, f"candidate_cells from saved map: {exc}")
@@ -212,6 +221,15 @@ def _check_cells(c: cmo.Checker, dataset_dir: Path, manifest, placement: Mapping
                     float(gain_db_all[bs_index, iy, ix]) >= threshold - 1e-9,
                     f"{view_id} BS{bs_index} gain >= threshold {threshold:.2f} dB",
                 )
+        elif settings.aggregation == "any":
+            passes_any = False
+            for bs_index, threshold in enumerate(thresholds):
+                if threshold is None:
+                    continue
+                if float(gain_db_all[bs_index, iy, ix]) >= float(threshold) - 1e-9:
+                    passes_any = True
+                    break
+            c.check(passes_any, f"{view_id} passes at least one BS threshold (any)")
         else:
             gain_db = _aggregated_gain_db(saved.path_gain, settings.aggregation, iy, ix)
             c.check(
@@ -235,7 +253,7 @@ def _check_cells(c: cmo.Checker, dataset_dir: Path, manifest, placement: Mapping
                 f"{view_id} distance to BS{bs_index} {distance:.3f} m "
                 f">= {settings.min_bs_distance_m} m",
             )
-        positions.append((float(center[0]), float(center[1])))
+        positions.append((float(position[0]), float(position[1])))
 
     for i in range(len(positions)):
         for j in range(i + 1, len(positions)):
@@ -244,8 +262,48 @@ def _check_cells(c: cmo.Checker, dataset_dir: Path, manifest, placement: Mapping
             )
             c.check(
                 spacing >= settings.min_spacing_m - 1e-9,
-                f"views {i}/{j} cell-centre spacing {spacing:.3f} m >= {settings.min_spacing_m} m",
+                f"views {i}/{j} position spacing {spacing:.3f} m >= {settings.min_spacing_m} m",
             )
+
+
+def _check_los(c: cmo.Checker, dataset_dir: Path, manifest, placement: Mapping) -> None:
+    """Check the per-view LoS flags against the saved LoS mask, the quota and the path GT.
+
+    Without jitter a UE sits on its cell centre, so the geometric LoS flag of
+    its cell must match the traced LoS path (``los_visibility`` of the path GT).
+    """
+    los_section = placement.get("los")
+    if los_section is None:
+        return
+    saved = load_radio_map(dataset_dir / placement["radio_map"]["metadata"])
+    if saved.los_mask is None:
+        c.check(False, "placement records a LoS section but the saved map has no los_mask")
+        return
+    for entry in placement["views"]:
+        view_id = entry["view_id"]
+        iy, ix = int(entry["cell_index"][0]), int(entry["cell_index"][1])
+        expected = [bool(v) for v in saved.los_mask[:, iy, ix]]
+        c.check(entry.get("los_bs") == expected, f"{view_id} los_bs == saved los_mask")
+    settings = placement["settings"]
+    if float(settings.get("jitter_fraction", 0.0)) == 0.0:
+        visible, source = los_visibility(manifest)
+        c.check(source == "path_gt", f"LoS visibility from the path GT (source={source})")
+        row_of = {view.view_id: row for row, view in enumerate(manifest.views)}
+        for entry in placement["views"]:
+            traced = [bool(v) for v in visible[row_of[entry["view_id"]]]]
+            c.check(
+                entry.get("los_bs") == traced,
+                f"{entry['view_id']} geometric los_bs {entry.get('los_bs')} == traced LoS {traced}",
+            )
+    los_fraction = settings.get("los_fraction")
+    if los_fraction is not None:
+        num_views = int(settings["num_views"])
+        wanted = int(math.floor(float(los_fraction) * num_views + 0.5))
+        got = sum(1 for entry in placement["views"] if entry.get("los") is True)
+        c.check(
+            got == wanted,
+            f"LoS view count {got} == floor(los_fraction*num_views + 0.5)={wanted}",
+        )
 
 
 def _check_orientation(c: cmo.Checker, manifest, placement: Mapping) -> None:
@@ -418,6 +476,7 @@ def main() -> None:
     _check_replan(c, dataset_dir, placement)
     _check_poses(c, dataset_dir, manifest, placement)
     _check_cells(c, dataset_dir, manifest, placement)
+    _check_los(c, dataset_dir, manifest, placement)
     _check_orientation(c, manifest, placement)
     if args.same_seed_rerun is not None:
         _check_same_seed(c, dataset_dir, placement, args.same_seed_rerun)

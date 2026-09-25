@@ -9,6 +9,7 @@ from plateau_rt.application.build_scene import SceneBuilder
 from plateau_rt.domain.rf_camera.camera import RFViewSpec
 from plateau_rt.domain.rf_camera.placement import (
     AGGREGATIONS,
+    LOS_REFERENCES,
     ORIENTATION_POLICIES,
     THRESHOLD_MODES,
 )
@@ -180,6 +181,8 @@ def _plan_coverage_views(
     radio_map: Path | None,
     ue_height_m: float,
     target: tuple[float, float, float],
+    los_fraction: float | None,
+    los_reference: str,
 ) -> tuple[list[RFViewSpec], dict[str, Any]]:
     """Plan coverage-map UE views and build the manifest ``placement`` section.
 
@@ -220,6 +223,8 @@ def _plan_coverage_views(
             carrier_frequency_hz=config.carrier_frequency_hz,
             base_stations=base_stations,
             ue_height_m=ue_height_m,
+            tx_pattern=config.tx_pattern,
+            polarization=config.polarization,
         )
         recorded_scene = str(saved.metadata.get("source_scene", ""))
         if Path(recorded_scene).resolve() != Path(xml_file).resolve():
@@ -257,6 +262,9 @@ def _plan_coverage_views(
             ],
             carrier_frequency_hz=config.carrier_frequency_hz,
             source_scene=str(xml_file),
+            los_mask=result.los_mask,
+            tx_pattern=config.tx_pattern,
+            polarization=config.polarization,
         )
         radio_map_source = "computed"
         radio_map_origin = None
@@ -274,6 +282,8 @@ def _plan_coverage_views(
         face_bs=face_bs,
         target=tuple(target),
         pitch_deg=pitch_deg,
+        los_fraction=los_fraction,
+        los_reference=los_reference,
     )
     exclusion = building_exclusion_mask(
         saved.indoor_mask, saved.grid, clearance_m=building_clearance_m
@@ -284,6 +294,7 @@ def _plan_coverage_views(
         settings,
         exclusion_mask=exclusion,
         bs_positions=[position for _, position, _ in base_stations],
+        los_mask=saved.los_mask,
     )
     section = placement_manifest_section(
         placement,
@@ -297,14 +308,18 @@ def _plan_coverage_views(
         f"coverage candidates={placement.candidates.count} "
         f"threshold_db={list(placement.candidates.threshold_db)}"
     )
+    if section["los"] is not None:
+        los_total = section["los"]["candidates_los"]
+        click.echo(f"los candidates={los_total}/{placement.candidates.count}")
     for row, view in enumerate(placement.views):
         chosen = int(placement.sampled.candidate_index[row])
         iy, ix = (int(v) for v in placement.candidates.indices[chosen])
+        los = section["views"][row]["los"]
         click.echo(
             f"  [{row + 1:02d}/{len(placement.views):02d}] {view.view_id}: "
             f"cell=({iy},{ix}) position={view.position} "
             f"gain_db={float(placement.candidates.gain_db[chosen]):.2f} "
-            f"facing_bs={placement.facing_bs_index[row]}"
+            f"facing_bs={placement.facing_bs_index[row]} los={los}"
         )
     return placement.views, section
 
@@ -363,7 +378,7 @@ def _plan_coverage_views(
 @click.option(
     "--pl-threshold",
     type=float,
-    default=30.0,
+    default=50.0,
     show_default=True,
     help="Threshold in dB (absolute / below max) or percentile (coverage only)",
 )
@@ -372,7 +387,26 @@ def _plan_coverage_views(
     type=click.Choice(AGGREGATIONS),
     default="max",
     show_default=True,
-    help="Multi-BS path-gain aggregation (coverage only)",
+    help=(
+        "Multi-BS candidate rule: max/sum of gains vs one threshold, or per-BS "
+        "thresholds combined by all (intersection) / any (union) (coverage only)"
+    ),
+)
+@click.option(
+    "--los-fraction",
+    type=click.FloatRange(0.0, 1.0),
+    default=None,
+    help=(
+        "Fraction of views drawn from LoS cells; the rest from NLoS cells "
+        "(coverage only; default: no LoS quota)"
+    ),
+)
+@click.option(
+    "--los-reference",
+    type=click.Choice(LOS_REFERENCES),
+    default="any",
+    show_default=True,
+    help="A cell is LoS when it sees any / all BSs (coverage only)",
 )
 @click.option(
     "--orientation-policy",
@@ -456,7 +490,7 @@ def _plan_coverage_views(
 @click.option(
     "--rm-samples-per-tx",
     type=int,
-    default=1_000_000,
+    default=100_000_000,
     show_default=True,
     help="RadioMapSolver samples_per_tx (coverage only)",
 )
@@ -495,6 +529,8 @@ def rf_camera_multiview(
     pl_threshold_mode: str,
     pl_threshold: float,
     bs_aggregation: str,
+    los_fraction: float | None,
+    los_reference: str,
     orientation_policy: str,
     face_bs: str,
     pitch_deg: float,
@@ -519,6 +555,7 @@ def rf_camera_multiview(
 
     --placement coverage ではUE高さの2Dパスゲイン(ラジオマップ)を計算し、
     しきい値を超える建物外のセルから --placement-seed でUE姿勢を抽選します。
+    --los-fraction を指定するとLoSセル/NLoSセルの割当を分けて抽選できます。
     ラジオマップは placement/ に保存され、--radio-map で再利用すると
     「保存マップ+seed」から同一の姿勢を再現できます。
     """
@@ -584,6 +621,8 @@ def rf_camera_multiview(
             threshold_mode=pl_threshold_mode,
             threshold_value=pl_threshold,
             aggregation=bs_aggregation,
+            los_fraction=los_fraction,
+            los_reference=los_reference,
             orientation_policy=orientation_policy,
             face_bs=face_bs_value,
             pitch_deg=pitch_deg,

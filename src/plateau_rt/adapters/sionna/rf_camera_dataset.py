@@ -176,6 +176,43 @@ class RFMultiViewConfig:
         return stations
 
 
+def prepare_rf_camera_scene(
+    xml_path: Path, config: RFMultiViewConfig
+) -> tuple[Any, list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]]:
+    """Load the scene with the RF-camera arrays and one transmitter per BS.
+
+    Checks the carrier against the scene materials, sets ``scene.frequency``,
+    configures the arrays (``config.tx_pattern``, the hemisphere-split receive
+    pattern, ``config.polarization``) and adds ``Transmitter("rf_camera_<bs_id>")``
+    in :meth:`RFMultiViewConfig.resolve_base_stations` order. Returns the scene
+    and the resolved base stations.
+    """
+    check_scene_carrier_frequency(xml_path, config.carrier_frequency_hz)
+    scene = load_scene(str(xml_path))
+    scene.frequency = config.carrier_frequency_hz
+    configure_rf_camera_arrays(
+        scene,
+        rx_rows=config.rx_rows,
+        rx_cols=config.rx_cols,
+        vertical_spacing_lambda=config.vertical_spacing_lambda,
+        horizontal_spacing_lambda=config.horizontal_spacing_lambda,
+        tx_pattern=config.tx_pattern,
+        rx_pattern=HEMISPHERE_SPLIT_PATTERN,
+        polarization=config.polarization,
+    )
+    base_stations = config.resolve_base_stations()
+    for bs_id, position, look_at in base_stations:
+        scene.add(
+            Transmitter(
+                name=f"rf_camera_{bs_id}",
+                position=list(position),
+                look_at=list(look_at),
+                power_dbm=config.tx_power_dbm,
+            )
+        )
+    return scene, base_stations
+
+
 class RFMultiViewDataset:
     """Generate a compact multi-BS / multi-UE RF-camera dataset."""
 
@@ -204,30 +241,7 @@ class RFMultiViewDataset:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         cfg = self.config
-        check_scene_carrier_frequency(self.xml_path, cfg.carrier_frequency_hz)
-        scene = load_scene(str(self.xml_path))
-        scene.frequency = cfg.carrier_frequency_hz
-        configure_rf_camera_arrays(
-            scene,
-            rx_rows=cfg.rx_rows,
-            rx_cols=cfg.rx_cols,
-            vertical_spacing_lambda=cfg.vertical_spacing_lambda,
-            horizontal_spacing_lambda=cfg.horizontal_spacing_lambda,
-            tx_pattern=cfg.tx_pattern,
-            rx_pattern=HEMISPHERE_SPLIT_PATTERN,
-            polarization=cfg.polarization,
-        )
-
-        base_stations = cfg.resolve_base_stations()
-        for bs_id, position, look_at in base_stations:
-            scene.add(
-                Transmitter(
-                    name=f"rf_camera_{bs_id}",
-                    position=list(position),
-                    look_at=list(look_at),
-                    power_dbm=cfg.tx_power_dbm,
-                )
-            )
+        scene, base_stations = prepare_rf_camera_scene(self.xml_path, cfg)
 
         for view in self.views:
             scene.add(

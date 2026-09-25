@@ -39,9 +39,15 @@ import numpy as np
 from plateau_rt.domain.rf_camera.camera import RFViewSpec, look_at_orientation
 
 THRESHOLD_MODES: tuple[str, ...] = ("absolute_db", "relative_to_max_db", "percentile")
-AGGREGATIONS: tuple[str, ...] = ("max", "sum", "all")
+AGGREGATIONS: tuple[str, ...] = ("max", "sum", "all", "any")
+LOS_REFERENCES: tuple[str, ...] = ("any", "all")
 ORIENTATION_POLICIES: tuple[str, ...] = ("look_at_target", "face_bs", "random_yaw")
 RNG_DERIVATION = "SeedSequence(placement_seed).spawn(2) -> [positions, orientation]"
+# Version 2 draws the intra-cell jitter for every candidate before the greedy
+# spacing scan, so ``min_spacing_m`` is enforced on the jittered positions.
+# Version 1 jittered only the accepted cells after the scan, so two accepted
+# UEs could end up closer than ``min_spacing_m``.
+SAMPLER_VERSION = 2
 
 
 def _as_finite_float(name: str, value: Any) -> float:
@@ -228,7 +234,7 @@ class CoverageThreshold:
     """Candidate threshold on the (aggregated) path gain in dB."""
 
     mode: str = "relative_to_max_db"
-    value: float = 30.0
+    value: float = 50.0
 
     def validate(self) -> None:
         """Check the threshold mode and value ranges."""
@@ -419,6 +425,19 @@ def dilate_mask(mask: np.ndarray, grid: RadioMapGrid, radius_m: float) -> np.nda
     return dilated
 
 
+def los_indicator(per_bs_los: np.ndarray, reference: str) -> np.ndarray:
+    """Reduce a bool ``[N, B]`` per-BS LoS array to ``[N]`` (``any`` / ``all`` over BSs)."""
+    if reference not in LOS_REFERENCES:
+        raise ValueError(f"unknown los reference {reference!r}; expected one of {LOS_REFERENCES}")
+    los = np.asarray(per_bs_los)
+    if los.ndim != 2:
+        raise ValueError(f"per_bs_los must have shape [N, B], got shape {los.shape}")
+    los_bool = los.astype(bool)
+    if reference == "all":
+        return np.all(los_bool, axis=1)
+    return np.any(los_bool, axis=1)
+
+
 @dataclass(frozen=True)
 class CandidateCells:
     """Cells that pass the validity, exclusion, BS-distance and threshold tests."""
@@ -430,6 +449,8 @@ class CandidateCells:
     mask: np.ndarray
     threshold_db: tuple[float, ...]
     counts: Mapping[str, int]
+    per_bs_los: np.ndarray | None = None
+    per_bs_passing: tuple[int, ...] | None = None
 
     @property
     def count(self) -> int:
@@ -446,15 +467,21 @@ def candidate_cells(
     exclusion_mask: np.ndarray | None = None,
     bs_positions: Sequence[Sequence[float]] | None = None,
     min_bs_distance_m: float = 0.0,
+    los_mask: np.ndarray | None = None,
 ) -> CandidateCells:
     """Select the radio-map cells that may host a UE.
 
     ``path_gain`` is LINEAR, ``[ny, nx]`` (one BS) or ``[B, ny, nx]``. A cell is
     invalid when its aggregated dB is ``-inf``, excluded when ``exclusion_mask``
     is True, and too close when its 3D centre distance to any BS position is
-    ``< min_bs_distance_m``. Eligible cells pass the ``threshold`` (one
-    threshold per BS for ``aggregation="all"``); the resolved threshold is
-    computed over the eligible cells only.
+    ``< min_bs_distance_m``. Eligible cells pass the ``threshold``; for
+    ``aggregation`` ``"all"`` the per-BS thresholds are combined by
+    intersection and for ``"any"`` by union. The resolved threshold is computed
+    over the eligible cells only.
+
+    ``los_mask`` is an optional bool ``[ny, nx]`` (promoted to ``[1, ny, nx]``)
+    or ``[B, ny, nx]`` geometric LoS indicator stored per candidate as
+    ``per_bs_los``; it does not affect selection.
     """
     grid.validate()
     if not isinstance(threshold, CoverageThreshold):
@@ -478,6 +505,26 @@ def candidate_cells(
     num_bs = int(gain.shape[0])
     if num_bs < 1:
         raise ValueError("path_gain needs at least one base station")
+    los: np.ndarray | None = None
+    if los_mask is not None:
+        los_array = np.asarray(los_mask)
+        if los_array.ndim == 2:
+            if tuple(los_array.shape) != (ny, nx):
+                raise ValueError(
+                    f"los_mask shape {los_array.shape} does not match grid shape {(ny, nx)}"
+                )
+            los_array = los_array[None, :, :]
+        elif los_array.ndim != 3 or tuple(los_array.shape[1:]) != (ny, nx):
+            raise ValueError(
+                "los_mask must have shape [ny, nx] or [B, ny, nx] matching the grid, "
+                f"got shape {los_array.shape}"
+            )
+        if int(los_array.shape[0]) != num_bs:
+            raise ValueError(
+                f"los_mask has {int(los_array.shape[0])} base-station slices, "
+                f"but path_gain has {num_bs}"
+            )
+        los = los_array.astype(bool)
     min_distance = _as_nonnegative_float("min_bs_distance_m", min_bs_distance_m)
     if exclusion_mask is None:
         excluded = np.zeros((ny, nx), dtype=bool)
@@ -494,7 +541,7 @@ def candidate_cells(
         raise ValueError("bs_positions is required when min_bs_distance_m > 0")
 
     gain_db = path_gain_db(gain)
-    if aggregation == "max":
+    if aggregation in ("max", "any"):
         aggregated = np.max(gain_db, axis=0)
     elif aggregation == "sum":
         sanitized = np.where(np.isfinite(gain) & (gain > 0.0), gain, 0.0)
@@ -520,20 +567,31 @@ def candidate_cells(
         raise ValueError("no eligible radio-map cells after validity/exclusion screening")
 
     value = float(threshold.value)
-    if aggregation == "all":
+    per_bs_passing: tuple[int, ...] | None = None
+    if aggregation in ("all", "any"):
         resolved: list[float] = []
         for bs in range(num_bs):
-            own = gain_db[bs][eligible]
-            if threshold.mode == "absolute_db":
+            own = gain_db[bs][eligible & np.isfinite(gain_db[bs])]
+            if own.size == 0:
+                resolved.append(float("inf"))
+            elif threshold.mode == "absolute_db":
                 resolved.append(value)
             elif threshold.mode == "relative_to_max_db":
                 resolved.append(float(np.max(own)) - value)
             else:
                 resolved.append(float(np.percentile(own, value)))
         threshold_db = tuple(resolved)
-        passes = np.ones((ny, nx), dtype=bool)
-        for bs in range(num_bs):
-            passes &= gain_db[bs] >= threshold_db[bs]
+        per_bs_passing = tuple(
+            int(np.sum(eligible & (gain_db[bs] >= threshold_db[bs]))) for bs in range(num_bs)
+        )
+        if aggregation == "all":
+            passes = np.ones((ny, nx), dtype=bool)
+            for bs in range(num_bs):
+                passes &= gain_db[bs] >= threshold_db[bs]
+        else:
+            passes = np.zeros((ny, nx), dtype=bool)
+            for bs in range(num_bs):
+                passes |= gain_db[bs] >= threshold_db[bs]
     else:
         own_all = aggregated[eligible]
         if threshold.mode == "absolute_db":
@@ -564,6 +622,8 @@ def candidate_cells(
         mask=np.ascontiguousarray(selected),
         threshold_db=threshold_db,
         counts=counts,
+        per_bs_los=None if los is None else np.ascontiguousarray(los[:, selected].T),
+        per_bs_passing=per_bs_passing,
     )
 
 
@@ -583,14 +643,25 @@ def sample_placements(
     grid: RadioMapGrid | None = None,
     min_spacing_m: float = 0.0,
     jitter_fraction: float = 0.0,
+    los: np.ndarray | None = None,
+    los_fraction: float | None = None,
 ) -> SampledCells:
     """Draw ``num_views`` UE host cells uniformly without replacement.
 
     The RNG consumption order is part of the contract: exactly one
-    ``rng.permutation`` call, then (only when ``jitter_fraction > 0``) exactly
-    one ``rng.uniform`` call. A greedy scan of the permutation accepts a cell
-    when its horizontal distance to every accepted cell centre is
-    ``>= min_spacing_m``.
+    ``rng.permutation(count)`` call (always, first), then (only when
+    ``jitter_fraction > 0``) exactly one ``rng.uniform(-0.5, 0.5, size=(count,
+    2))`` call. The jitter of row ``i`` belongs to candidate ``i`` (not to
+    permutation position ``i``) and is applied before the greedy scan, so the
+    ``min_spacing_m`` test uses the jittered positions.
+
+    With ``los_fraction`` and a bool ``los`` ``[count]`` the draw is stratified:
+    ``n_los = floor(los_fraction * num_views + 0.5)`` views are taken from LoS
+    candidates and ``num_views - n_los`` from NLoS candidates. The greedy scan
+    walks the permutation once, accepts a candidate only while its stratum
+    quota is left and its jittered position is ``>= min_spacing_m`` away from
+    every accepted position (all strata together), and stops when both quotas
+    are filled.
     """
     if (
         isinstance(num_views, bool)
@@ -612,37 +683,73 @@ def sample_placements(
     if grid is not None:
         grid.validate()
     count = int(candidates.count)
-    order = np.asarray(rng.permutation(count), dtype=np.int64)
-    accepted: list[int] = []
-    if spacing == 0.0:
-        accepted = [int(v) for v in order[:num_views]]
+    los_bool: np.ndarray | None = None
+    quotas: tuple[int, ...]
+    if los_fraction is not None:
+        fraction = _as_finite_float("los_fraction", los_fraction)
+        if not 0.0 <= fraction <= 1.0:
+            raise ValueError(
+                f"los_fraction must satisfy 0 <= los_fraction <= 1, got {los_fraction!r}"
+            )
+        if los is None:
+            raise ValueError("los is required when los_fraction is set")
+        los_array = np.asarray(los)
+        if los_array.ndim != 1 or int(los_array.shape[0]) != count:
+            raise ValueError(f"los must have shape [{count}], got shape {los_array.shape}")
+        los_bool = los_array.astype(bool)
+        n_los = int(np.floor(fraction * num_views + 0.5))
+        quotas = (n_los, num_views - n_los)
     else:
-        centres = np.asarray(candidates.positions_m, dtype=np.float64)
-        for raw in order:
-            index = int(raw)
-            ok = True
-            for other in accepted:
-                dx = float(centres[index, 0]) - float(centres[other, 0])
-                dy = float(centres[index, 1]) - float(centres[other, 1])
-                if np.hypot(dx, dy) < spacing:
-                    ok = False
-                    break
-            if ok:
-                accepted.append(index)
-            if len(accepted) == num_views:
-                break
-    if len(accepted) < num_views:
-        raise ValueError(
-            f"could only place {len(accepted)}/{num_views} views from {count} "
-            f"candidates with min_spacing_m={spacing}"
-        )
-    candidate_index = np.asarray(accepted, dtype=np.int64)
-    positions = np.asarray(candidates.positions_m, dtype=np.float64)[candidate_index].copy()
+        # Without los_fraction there is no stratification; a given los is ignored.
+        quotas = (num_views,)
+
+    order = np.asarray(rng.permutation(count), dtype=np.int64)
+    positions_all = np.asarray(candidates.positions_m, dtype=np.float64).copy()
     if jitter > 0.0:
         assert grid is not None
-        draws = rng.uniform(-0.5, 0.5, size=(num_views, 2))
-        positions[:, 0] += draws[:, 0] * jitter * float(grid.cell_size_m[0])
-        positions[:, 1] += draws[:, 1] * jitter * float(grid.cell_size_m[1])
+        offsets = rng.uniform(-0.5, 0.5, size=(count, 2))
+        positions_all[:, 0] += offsets[:, 0] * jitter * float(grid.cell_size_m[0])
+        positions_all[:, 1] += offsets[:, 1] * jitter * float(grid.cell_size_m[1])
+
+    def stratum(index: int) -> int:
+        if los_bool is None:
+            return 0
+        return 0 if bool(los_bool[index]) else 1
+
+    remaining = list(quotas)
+    accepted: list[int] = []
+    for raw in order:
+        index = int(raw)
+        which = stratum(index)
+        if remaining[which] <= 0:
+            continue
+        ok = True
+        for other in accepted:
+            dx = float(positions_all[index, 0]) - float(positions_all[other, 0])
+            dy = float(positions_all[index, 1]) - float(positions_all[other, 1])
+            if np.hypot(dx, dy) < spacing:
+                ok = False
+                break
+        if ok:
+            accepted.append(index)
+            remaining[which] -= 1
+        if all(value <= 0 for value in remaining):
+            break
+
+    if any(value > 0 for value in remaining):
+        if los_bool is None:
+            raise ValueError(
+                f"could only place {len(accepted)}/{num_views} views from {count} "
+                f"candidates with min_spacing_m={spacing}"
+            )
+        placed_los = quotas[0] - remaining[0]
+        placed_nlos = quotas[1] - remaining[1]
+        raise ValueError(
+            f"could only place {placed_los}/{quotas[0]} LoS and {placed_nlos}/{quotas[1]} "
+            f"NLoS views from {count} candidates with min_spacing_m={spacing}"
+        )
+    candidate_index = np.asarray(accepted, dtype=np.int64)
+    positions = positions_all[candidate_index].copy()
     return SampledCells(candidate_index=candidate_index, positions_m=positions)
 
 
@@ -777,6 +884,8 @@ class CoveragePlacementSettings:
     face_bs: int | str = "strongest"
     target: tuple[float, float, float] | None = None
     pitch_deg: float = 0.0
+    los_fraction: float | None = None
+    los_reference: str = "any"
 
     def validate(self) -> None:
         """Check every setting value and cross-field requirement."""
@@ -838,6 +947,16 @@ class CoveragePlacementSettings:
             _as_point("target", self.target)
         elif self.target is not None:
             _as_point("target", self.target)
+        if self.los_fraction is not None:
+            fraction = _as_finite_float("los_fraction", self.los_fraction)
+            if not 0.0 <= fraction <= 1.0:
+                raise ValueError(
+                    f"los_fraction must satisfy 0 <= los_fraction <= 1, got {self.los_fraction!r}"
+                )
+        if self.los_reference not in LOS_REFERENCES:
+            raise ValueError(
+                f"unknown los_reference {self.los_reference!r}; expected one of {LOS_REFERENCES}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """Return the JSON-serializable description of these settings."""
@@ -856,6 +975,8 @@ class CoveragePlacementSettings:
             "face_bs": face_bs,
             "target": [float(v) for v in self.target] if self.target is not None else None,
             "pitch_deg": float(self.pitch_deg),
+            "los_fraction": None if self.los_fraction is None else float(self.los_fraction),
+            "los_reference": self.los_reference,
         }
 
     @classmethod
@@ -878,6 +999,8 @@ class CoveragePlacementSettings:
                 face_bs=data["face_bs"],
                 target=tuple(target_data) if target_data is not None else None,
                 pitch_deg=data["pitch_deg"],
+                los_fraction=data.get("los_fraction", None),
+                los_reference=data.get("los_reference", "any"),
             )
         except KeyError:
             raise ValueError(f"settings record misses required keys: {data!r}") from None
@@ -903,6 +1026,7 @@ class CoveragePlacement:
         allow_nan=False)`` succeeds even when a chosen cell has ``-inf`` gain.
         """
         entries: list[dict[str, Any]] = []
+        per_bs_los = self.candidates.per_bs_los
         for row, view in enumerate(self.views):
             chosen = int(self.sampled.candidate_index[row])
             iy, ix = (
@@ -910,6 +1034,13 @@ class CoveragePlacement:
                 int(self.candidates.indices[chosen, 1]),
             )
             facing = self.facing_bs_index[row]
+            los_bs = None if per_bs_los is None else [bool(v) for v in per_bs_los[chosen, :]]
+            if los_bs is None:
+                los: bool | None = None
+            elif self.settings.los_reference == "all":
+                los = all(los_bs)
+            else:
+                los = any(los_bs)
             entries.append(
                 {
                     "view_id": view.view_id,
@@ -939,11 +1070,26 @@ class CoveragePlacement:
                         _json_float(v) for v in self.candidates.per_bs_gain_db[chosen, :]
                     ],
                     "facing_bs_index": None if facing is None else int(facing),
+                    "los_bs": los_bs,
+                    "los": los,
                 }
             )
+        if per_bs_los is None:
+            los_section: dict[str, Any] | None = None
+        else:
+            reduced = los_indicator(per_bs_los, self.settings.los_reference)
+            los_section = {
+                "reference": self.settings.los_reference,
+                "definition": "geometric shadow ray from the cell centre to each BS",
+                "candidates_los": int(np.sum(reduced)),
+                "candidates_nlos": int(reduced.size - np.sum(reduced)),
+            }
+        aggregation = self.settings.aggregation
+        per_bs_passing = self.candidates.per_bs_passing
         return {
             "method": "coverage",
             "placement_seed": int(self.settings.placement_seed),
+            "sampler_version": SAMPLER_VERSION,
             "rng": {
                 "bit_generator": "PCG64",
                 "derivation": RNG_DERIVATION,
@@ -951,9 +1097,18 @@ class CoveragePlacement:
             },
             "settings": self.settings.to_dict(),
             "grid": self.grid.to_dict(),
-            "threshold_db": [float(v) for v in self.candidates.threshold_db],
+            "threshold_db": [_json_float(v) for v in self.candidates.threshold_db],
             "candidate_count": int(self.candidates.count),
             "cell_counts": dict(self.candidates.counts),
+            "multi_bs": {
+                "aggregation": aggregation,
+                "per_bs_threshold": aggregation in ("all", "any"),
+                "combine": {"all": "intersection", "any": "union"}.get(aggregation),
+                "per_bs_passing_cells": (
+                    None if per_bs_passing is None else [int(v) for v in per_bs_passing]
+                ),
+            },
+            "los": los_section,
             "views": entries,
         }
 
@@ -965,13 +1120,16 @@ def plan_coverage_placement(
     *,
     exclusion_mask: np.ndarray | None = None,
     bs_positions: Sequence[Sequence[float]] | None = None,
+    los_mask: np.ndarray | None = None,
 ) -> CoveragePlacement:
     """Plan UE poses from a linear path-gain map ``[ny, nx]`` or ``[B, ny, nx]``.
 
     Candidate selection is deterministic; the UE draw and the orientation draw
     use two independent streams spawned from
     ``SeedSequence(placement_seed)`` (``[positions, orientation]``), so changing
-    only the orientation policy leaves the positions unchanged.
+    only the orientation policy leaves the positions unchanged. With
+    ``los_mask`` and ``settings.los_fraction`` the UE draw is stratified into
+    LoS / NLoS quotas using the geometric LoS indicator.
     """
     settings.validate()
     grid.validate()
@@ -983,10 +1141,18 @@ def plan_coverage_placement(
         exclusion_mask=exclusion_mask,
         bs_positions=bs_positions,
         min_bs_distance_m=settings.min_bs_distance_m,
+        los_mask=los_mask,
     )
+    if settings.los_fraction is not None and candidates.per_bs_los is None:
+        raise ValueError("los_fraction needs a LoS mask (los_mask) to stratify the UE draw")
     position_seq, orientation_seq = np.random.SeedSequence(int(settings.placement_seed)).spawn(2)
     position_rng = np.random.default_rng(position_seq)
     orientation_rng = np.random.default_rng(orientation_seq)
+    los_indices = (
+        None
+        if candidates.per_bs_los is None
+        else los_indicator(candidates.per_bs_los, settings.los_reference)
+    )
     sampled = sample_placements(
         candidates,
         int(settings.num_views),
@@ -994,6 +1160,8 @@ def plan_coverage_placement(
         grid=grid,
         min_spacing_m=float(settings.min_spacing_m),
         jitter_fraction=float(settings.jitter_fraction),
+        los=los_indices,
+        los_fraction=settings.los_fraction,
     )
     views, facing = orient_views(
         sampled.positions_m,

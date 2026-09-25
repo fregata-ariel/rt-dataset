@@ -13,18 +13,19 @@ artifact and reuse them through
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import mitsuba as mi
 import numpy as np
-from sionna.rt import RadioMapSolver, Transmitter, load_scene
+from sionna.rt import RadioMapSolver
 
-from plateau_rt.adapters.sionna.rf_camera_dataset import RFMultiViewConfig
-from plateau_rt.adapters.sionna.rf_patterns import HEMISPHERE_SPLIT_PATTERN
-from plateau_rt.adapters.sionna.rf_tracing import configure_rf_camera_arrays
-from plateau_rt.application.scene_checks import check_scene_carrier_frequency
+from plateau_rt.adapters.sionna.rf_camera_dataset import (
+    RFMultiViewConfig,
+    prepare_rf_camera_scene,
+)
 from plateau_rt.domain.rf_camera.placement import RadioMapGrid
 
 
@@ -33,7 +34,7 @@ class RadioMapSolverSettings:
     """Settings of one ``sionna.rt.RadioMapSolver`` call."""
 
     max_depth: int = 5
-    samples_per_tx: int = 1_000_000
+    samples_per_tx: int = 100_000_000
     seed: int = 42
     los: bool = True
     specular_reflection: bool = True
@@ -59,11 +60,12 @@ class RadioMapSolverSettings:
 
 @dataclass(frozen=True)
 class RadioMapResult:
-    """One computed radio map: path gain, indoor mask and its grid."""
+    """One computed radio map: path gain, indoor mask, grid and LoS mask."""
 
     path_gain: np.ndarray
     indoor_mask: np.ndarray
     grid: RadioMapGrid
+    los_mask: np.ndarray | None = None
 
 
 def _indoor_mask_from_upward_rays(scene: Any, grid: RadioMapGrid) -> np.ndarray:
@@ -85,6 +87,26 @@ def _indoor_mask_from_upward_rays(scene: Any, grid: RadioMapGrid) -> np.ndarray:
     return hit.reshape(grid.shape)
 
 
+def _los_mask_from_shadow_rays(
+    scene: Any, grid: RadioMapGrid, bs_positions: Sequence[Sequence[float]]
+) -> np.ndarray:
+    """Return bool ``[B, ny, nx]``: True where the segment cell centre -> BS is unobstructed."""
+    points = np.asarray(grid.cell_centers(), dtype=np.float64).reshape(-1, 3)
+    masks = []
+    for bs in bs_positions:
+        delta = np.asarray(bs, dtype=np.float64)[None, :] - points
+        dist = np.linalg.norm(delta, axis=1)
+        unit = delta / dist[:, None]
+        ray = mi.Ray3f(
+            mi.Point3f(points[:, 0], points[:, 1], points[:, 2]),
+            mi.Vector3f(unit[:, 0], unit[:, 1], unit[:, 2]),
+        )
+        ray.maxt = mi.Float(dist * (1.0 - 1e-6))
+        blocked = np.asarray(scene.mi_scene.ray_test(ray).numpy(), dtype=bool)
+        masks.append(~blocked.reshape(grid.shape))
+    return np.stack(masks, axis=0)
+
+
 def compute_radio_map(
     xml_path: Path,
     *,
@@ -101,31 +123,7 @@ def compute_radio_map(
     dataset_config.validate()
     grid.validate()
     solver.validate()
-    check_scene_carrier_frequency(xml_path, dataset_config.carrier_frequency_hz)
-
-    cfg = dataset_config
-    scene = load_scene(str(xml_path))
-    scene.frequency = cfg.carrier_frequency_hz
-    configure_rf_camera_arrays(
-        scene,
-        rx_rows=cfg.rx_rows,
-        rx_cols=cfg.rx_cols,
-        vertical_spacing_lambda=cfg.vertical_spacing_lambda,
-        horizontal_spacing_lambda=cfg.horizontal_spacing_lambda,
-        tx_pattern=cfg.tx_pattern,
-        rx_pattern=HEMISPHERE_SPLIT_PATTERN,
-        polarization=cfg.polarization,
-    )
-
-    base_stations = cfg.resolve_base_stations()
-    for bs_id, position, look_at in base_stations:
-        scene.add(
-            Transmitter(
-                name=f"rf_camera_{bs_id}",
-                position=list(position),
-                look_at=list(look_at),
-            )
-        )
+    scene, base_stations = prepare_rf_camera_scene(xml_path, dataset_config)
 
     radio_map = RadioMapSolver()(
         scene,
@@ -157,6 +155,9 @@ def compute_radio_map(
         )
 
     indoor_mask = _indoor_mask_from_upward_rays(scene, grid)
+    los_mask = _los_mask_from_shadow_rays(
+        scene, grid, [position for _, position, _ in base_stations]
+    )
 
     print("=== Radio map ===")
     print(f"scene={xml_path}")
@@ -165,7 +166,12 @@ def compute_radio_map(
         gain = path_gain[index]
         peak = float(np.max(gain))
         peak_db = 10.0 * np.log10(peak) if peak > 0.0 else float("-inf")
-        print(f"BS {bs_id} at {position}: max path gain {peak_db:.2f} dB")
+        print(
+            f"BS {bs_id} at {position}: max path gain {peak_db:.2f} dB, "
+            f"LoS cells {int(np.sum(los_mask[index]))}/{los_mask[index].size}"
+        )
     print(f"indoor cells={int(np.sum(indoor_mask))}/{indoor_mask.size}")
 
-    return RadioMapResult(path_gain=path_gain, indoor_mask=indoor_mask, grid=grid)
+    return RadioMapResult(
+        path_gain=path_gain, indoor_mask=indoor_mask, grid=grid, los_mask=los_mask
+    )

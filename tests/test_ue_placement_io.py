@@ -16,6 +16,7 @@ from plateau_rt.application.rf_dataset_manifest import (
 from plateau_rt.application.ue_placement import (
     PLACEMENT_DIR,
     RADIO_MAP_INDOOR_MASK_FILE,
+    RADIO_MAP_LOS_MASK_FILE,
     RADIO_MAP_METADATA_FILE,
     RADIO_MAP_PATH_GAIN_FILE,
     building_exclusion_mask,
@@ -101,7 +102,10 @@ def test_save_load_round_trip(tmp_path: Path) -> None:
     assert np.array_equal(saved.path_gain, gain.astype(np.float32))
     assert np.array_equal(saved.indoor_mask, mask)
     assert saved.grid == grid
-    assert saved.metadata["format_version"] == 1
+    assert saved.metadata["format_version"] == 2
+    assert saved.los_mask is None
+    assert "los_mask" not in saved.metadata["artifacts"]
+    assert "los_mask" not in saved.metadata["sha256"]
     assert saved.metadata["path_gain_axis_order"] == ["bs", "y", "x"]
     assert saved.metadata["path_gain_scale"] == "linear"
     assert saved.metadata["source_scene"] == "mock_scene.xml"
@@ -283,4 +287,221 @@ def test_replan_from_manifest_reproduces_views(tmp_path: Path) -> None:
 def test_replan_rejects_missing_placement(tmp_path: Path) -> None:
     write_v3_dataset(tmp_path, num_views=2, num_bs=2)
     with pytest.raises(ValueError, match="placement"):
+        replan_from_manifest(tmp_path)
+
+
+def _los_mask(grid: RadioMapGrid) -> np.ndarray:
+    """Return a bool ``[2, ny, nx]`` LoS mask (BS0: x < 0, BS1: y < 0)."""
+    centres = grid.cell_centers()
+    return np.stack([centres[:, :, 0] < 0.0, centres[:, :, 1] < 0.0], axis=0)
+
+
+def _save_with_los(tmp_path: Path) -> tuple:
+    """Save a radio map with a LoS mask and antenna info; return (saved, mask)."""
+    grid = make_grid()
+    gain = free_space_gain(grid, list(BS_POSITIONS_M))
+    mask = footprint_mask(grid, [box_footprint(-5.0, -5.0, 5.0, 5.0)])
+    los = _los_mask(grid)
+    json_path = save_radio_map(
+        tmp_path,
+        path_gain=gain,
+        indoor_mask=mask,
+        grid=grid,
+        solver=SOLVER,
+        base_stations=_base_stations(),
+        carrier_frequency_hz=CARRIER_HZ,
+        source_scene="mock_scene.xml",
+        los_mask=los,
+        tx_pattern="tr38901",
+        polarization="V",
+    )
+    return load_radio_map(json_path), los
+
+
+def test_save_load_round_trip_with_los_mask(tmp_path: Path) -> None:
+    saved, los = _save_with_los(tmp_path)
+    placement_dir = tmp_path / PLACEMENT_DIR
+    assert saved.los_mask is not None
+    assert saved.los_mask.dtype == bool
+    assert np.array_equal(saved.los_mask, los)
+    assert saved.metadata["format_version"] == 2
+    assert saved.metadata["artifacts"]["los_mask"] == RADIO_MAP_LOS_MASK_FILE
+    assert saved.metadata["sha256"]["los_mask"] == file_sha256(
+        placement_dir / RADIO_MAP_LOS_MASK_FILE
+    )
+    assert saved.metadata["antenna"] == {"tx_pattern": "tr38901", "polarization": "V"}
+
+
+def test_tampered_or_bad_los_mask(tmp_path: Path) -> None:
+    saved, los = _save_with_los(tmp_path)
+    artifact = tmp_path / PLACEMENT_DIR / RADIO_MAP_LOS_MASK_FILE
+    np.save(artifact, ~los)
+    with pytest.raises(ValueError, match=RADIO_MAP_LOS_MASK_FILE):
+        load_radio_map(saved.metadata_path)
+
+    grid = make_grid()
+    gain = free_space_gain(grid, list(BS_POSITIONS_M))
+    mask = footprint_mask(grid, [box_footprint(-5.0, -5.0, 5.0, 5.0)])
+    with pytest.raises(ValueError):
+        save_radio_map(
+            tmp_path,
+            path_gain=gain,
+            indoor_mask=mask,
+            grid=grid,
+            solver=SOLVER,
+            base_stations=_base_stations(),
+            carrier_frequency_hz=CARRIER_HZ,
+            source_scene="mock_scene.xml",
+            los_mask=np.ones((3, *grid.shape), dtype=bool),
+        )
+
+
+def test_load_v1_and_reject_v3(tmp_path: Path) -> None:
+    saved, _, _, _ = _saved(tmp_path)
+    metadata_path = saved.metadata_path
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["format_version"] = 1
+    metadata.pop("antenna", None)
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    loaded = load_radio_map(metadata_path)
+    assert loaded.los_mask is None
+
+    metadata["format_version"] = 3
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    with pytest.raises(ValueError, match="format_version"):
+        load_radio_map(metadata_path)
+
+
+def test_copy_radio_map_copies_los_file(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    saved, _los = _save_with_los(source)
+    destination = tmp_path / "destination"
+    copy_radio_map(saved, destination)
+    assert (source / PLACEMENT_DIR / RADIO_MAP_LOS_MASK_FILE).read_bytes() == (
+        destination / PLACEMENT_DIR / RADIO_MAP_LOS_MASK_FILE
+    ).read_bytes()
+
+
+def test_check_radio_map_matches_antenna(tmp_path: Path) -> None:
+    saved, _los = _save_with_los(tmp_path)
+    base_stations = [
+        (f"bs_{index:03d}", tuple(position), tuple(TARGET_M))
+        for index, position in enumerate(BS_POSITIONS_M)
+    ]
+    check_radio_map_matches(
+        saved,
+        carrier_frequency_hz=CARRIER_HZ,
+        base_stations=base_stations,
+        ue_height_m=UE_HEIGHT,
+        tx_pattern="tr38901",
+        polarization="V",
+    )
+    with pytest.raises(ValueError, match="tx_pattern"):
+        check_radio_map_matches(
+            saved,
+            carrier_frequency_hz=CARRIER_HZ,
+            base_stations=base_stations,
+            ue_height_m=UE_HEIGHT,
+            tx_pattern="iso",
+        )
+    with pytest.raises(ValueError, match="polarization"):
+        check_radio_map_matches(
+            saved,
+            carrier_frequency_hz=CARRIER_HZ,
+            base_stations=base_stations,
+            ue_height_m=UE_HEIGHT,
+            polarization="H",
+        )
+    plain, _, _, _ = _saved(tmp_path / "plain")
+    with pytest.raises(ValueError, match="tx_pattern"):
+        check_radio_map_matches(
+            plain,
+            carrier_frequency_hz=CARRIER_HZ,
+            base_stations=base_stations,
+            ue_height_m=UE_HEIGHT,
+            tx_pattern="tr38901",
+        )
+    check_radio_map_matches(
+        plain,
+        carrier_frequency_hz=CARRIER_HZ,
+        base_stations=base_stations,
+        ue_height_m=UE_HEIGHT,
+    )
+
+
+def test_replan_with_los_fraction(tmp_path: Path) -> None:
+    grid = make_grid()
+    gain = free_space_gain(grid, list(BS_POSITIONS_M))
+    mask = footprint_mask(grid, [box_footprint(-5.0, -5.0, 5.0, 5.0)])
+    los = _los_mask(grid)
+    json_path = save_radio_map(
+        tmp_path,
+        path_gain=gain,
+        indoor_mask=mask,
+        grid=grid,
+        solver=SOLVER,
+        base_stations=_base_stations(),
+        carrier_frequency_hz=CARRIER_HZ,
+        source_scene="mock_scene.xml",
+        los_mask=los,
+    )
+    saved = load_radio_map(json_path)
+    settings = CoveragePlacementSettings(
+        num_views=6,
+        placement_seed=4,
+        threshold=CoverageThreshold(mode="relative_to_max_db", value=30.0),
+        aggregation="any",
+        min_spacing_m=2.0,
+        los_fraction=0.5,
+        los_reference="any",
+        orientation_policy="face_bs",
+    )
+    exclusion = building_exclusion_mask(mask, grid, clearance_m=1.0)
+    placement = plan_coverage_placement(
+        saved.path_gain,
+        saved.grid,
+        settings,
+        exclusion_mask=exclusion,
+        bs_positions=[list(p) for p in BS_POSITIONS_M],
+        los_mask=saved.los_mask,
+    )
+    section = placement_manifest_section(
+        placement,
+        saved=saved,
+        dataset_dir=tmp_path,
+        radio_map_source="computed",
+        radio_map_origin=None,
+        building_clearance_m=1.0,
+    )
+    assert section["radio_map"]["artifacts"]["los_mask"] == (
+        f"{PLACEMENT_DIR}/{RADIO_MAP_LOS_MASK_FILE}"
+    )
+    assert "los_mask" in section["radio_map"]["sha256"]
+    assert "antenna" in section["radio_map"]
+
+    write_v3_dataset(tmp_path, num_views=2, num_bs=2)
+    manifest = json.loads((tmp_path / MANIFEST_FILE_NAME).read_text(encoding="utf-8"))
+    manifest["placement"] = section
+    (tmp_path / MANIFEST_FILE_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    replanned = replan_from_manifest(tmp_path)
+    assert replanned.views == placement.views
+    assert replanned.to_record()["views"] == section["views"]
+
+
+def test_replan_rejects_legacy_jitter_sampler(tmp_path: Path) -> None:
+    settings = CoveragePlacementSettings(
+        num_views=4,
+        placement_seed=3,
+        threshold=CoverageThreshold(mode="relative_to_max_db", value=30.0),
+        min_spacing_m=3.0,
+        jitter_fraction=0.5,
+        orientation_policy="face_bs",
+    )
+    _, section = _plan(tmp_path, settings)
+    write_v3_dataset(tmp_path, num_views=2, num_bs=2)
+    manifest = json.loads((tmp_path / MANIFEST_FILE_NAME).read_text(encoding="utf-8"))
+    section.pop("sampler_version", None)
+    manifest["placement"] = section
+    (tmp_path / MANIFEST_FILE_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    with pytest.raises(ValueError, match="sampler_version"):
         replan_from_manifest(tmp_path)

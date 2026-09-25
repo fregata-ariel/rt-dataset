@@ -13,7 +13,9 @@ from plateau_rt.domain.rf_camera.calibration import rotation_matrix
 from plateau_rt.domain.rf_camera.camera import generate_ring_views
 from plateau_rt.domain.rf_camera.placement import (
     AGGREGATIONS,
+    LOS_REFERENCES,
     ORIENTATION_POLICIES,
+    SAMPLER_VERSION,
     THRESHOLD_MODES,
     CandidateCells,
     CoveragePlacementSettings,
@@ -23,6 +25,7 @@ from plateau_rt.domain.rf_camera.placement import (
     candidate_cells,
     dilate_mask,
     footprint_mask,
+    los_indicator,
     orient_views,
     path_gain_db,
     plan_coverage_placement,
@@ -631,10 +634,31 @@ def test_plan_leaves_global_rng_untouched() -> None:
         exclusion_mask=exclusion,
         bs_positions=BS_POSITIONS,
     )
+    los_mask = np.stack(
+        [grid.cell_centers()[:, :, 0] < 0.0, grid.cell_centers()[:, :, 1] < 0.0], axis=0
+    )
+    plan_coverage_placement(
+        gain,
+        grid,
+        make_settings(
+            placement_seed=7,
+            min_spacing_m=2.0,
+            jitter_fraction=0.5,
+            orientation_policy="random_yaw",
+            los_fraction=0.5,
+        ),
+        exclusion_mask=exclusion,
+        bs_positions=BS_POSITIONS,
+        los_mask=los_mask,
+    )
     after = np.random.get_state()
     assert before[0] == after[0]
     assert np.array_equal(before[1], after[1])
     assert before[2:] == after[2:]
+
+
+def test_default_threshold_is_50_db() -> None:
+    assert CoverageThreshold() == CoverageThreshold("relative_to_max_db", 50.0)
 
 
 def test_plan_record_round_trip_with_minus_inf_gain() -> None:
@@ -708,5 +732,345 @@ def test_ring_views_regression_pin() -> None:
 
 def test_public_mode_tuples() -> None:
     assert THRESHOLD_MODES == ("absolute_db", "relative_to_max_db", "percentile")
-    assert AGGREGATIONS == ("max", "sum", "all")
+    assert AGGREGATIONS == ("max", "sum", "all", "any")
+    assert LOS_REFERENCES == ("any", "all")
     assert ORIENTATION_POLICIES == ("look_at_target", "face_bs", "random_yaw")
+    assert SAMPLER_VERSION == 2
+
+
+def test_legacy_sampler_regression_pin() -> None:
+    grid = RadioMapGrid(center_m=(0.0, 0.0, 1.5), size_m=(20.0, 20.0), cell_size_m=(1.0, 1.0))
+    bs = [(-30.0, 0.0, 20.0), (25.0, 25.0, 15.0)]
+    gain = free_space_gain(grid, bs)
+    excl = footprint_mask(grid, [box_footprint(-3.0, -3.0, 3.0, 3.0)])
+    s = CoveragePlacementSettings(
+        num_views=6,
+        placement_seed=3,
+        min_spacing_m=2.5,
+        threshold=CoverageThreshold("relative_to_max_db", 30.0),
+        orientation_policy="face_bs",
+    )
+    p = plan_coverage_placement(gain, grid, s, exclusion_mask=excl, bs_positions=bs)
+    assert p.candidates.count == 364
+    assert p.sampled.candidate_index.tolist() == [49, 79, 212, 242, 111, 123]
+    assert p.candidates.indices[p.sampled.candidate_index].tolist() == [
+        [2, 9],
+        [3, 19],
+        [12, 2],
+        [13, 18],
+        [5, 11],
+        [6, 3],
+    ]
+
+
+def _all_candidate_grid(size: float = 40.0, cell: float = 4.0) -> tuple:
+    grid = RadioMapGrid(
+        center_m=(0.0, 0.0, UE_HEIGHT), size_m=(size, size), cell_size_m=(cell, cell)
+    )
+    gain = free_space_gain(grid)
+    candidates = candidate_cells(
+        gain, grid, threshold=CoverageThreshold(mode="absolute_db", value=-200.0)
+    )
+    assert candidates.count == 100
+    return candidates, grid
+
+
+def test_jitter_spacing_uses_jittered_positions() -> None:
+    candidates, grid = _all_candidate_grid()
+    for seed in range(50):
+        sampled = sample_placements(
+            candidates,
+            20,
+            rng=np.random.default_rng(seed),
+            grid=grid,
+            min_spacing_m=4.0,
+            jitter_fraction=0.9,
+        )
+        positions = sampled.positions_m
+        for i in range(len(positions)):
+            for j in range(i + 1, len(positions)):
+                dist = float(
+                    np.hypot(positions[i, 0] - positions[j, 0], positions[i, 1] - positions[j, 1])
+                )
+                assert dist >= 4.0
+
+    centres = grid.cell_centers().reshape(-1, 3)
+    for seed in range(5):
+        rng = np.random.default_rng(seed)
+        order = rng.permutation(100)
+        offsets = rng.uniform(-0.5, 0.5, size=(100, 2))
+        jittered = centres.copy()
+        jittered[:, 0] += offsets[:, 0] * 0.9 * 4.0
+        jittered[:, 1] += offsets[:, 1] * 0.9 * 4.0
+        accepted: list[int] = []
+        for raw in order:
+            index = int(raw)
+            if all(
+                float(
+                    np.hypot(
+                        jittered[index, 0] - jittered[other, 0],
+                        jittered[index, 1] - jittered[other, 1],
+                    )
+                )
+                >= 4.0
+                for other in accepted
+            ):
+                accepted.append(index)
+            if len(accepted) == 20:
+                break
+        expected_index = np.asarray(accepted, dtype=np.int64)
+        sampled = sample_placements(
+            candidates,
+            20,
+            rng=np.random.default_rng(seed),
+            grid=grid,
+            min_spacing_m=4.0,
+            jitter_fraction=0.9,
+        )
+        np.testing.assert_array_equal(sampled.candidate_index, expected_index)
+        np.testing.assert_array_equal(sampled.positions_m, jittered[expected_index])
+
+
+def test_jitter_offsets_stay_inside_cell() -> None:
+    candidates, grid = _roomy_candidates()
+    plain = sample_placements(
+        candidates, 5, rng=np.random.default_rng(0), grid=grid, jitter_fraction=0.0
+    )
+    np.testing.assert_array_equal(plain.positions_m, candidates.positions_m[plain.candidate_index])
+    jittered = sample_placements(
+        candidates, 5, rng=np.random.default_rng(0), grid=grid, jitter_fraction=0.5
+    )
+    for row, chosen in enumerate(jittered.candidate_index.tolist()):
+        iy, ix = (int(v) for v in candidates.indices[int(chosen)])
+        center = grid.cell_centers()[iy, ix]
+        offset = jittered.positions_m[row] - center
+        assert abs(float(offset[0])) <= 0.25 + 1e-12
+        assert abs(float(offset[1])) <= 0.25 + 1e-12
+        assert float(offset[2]) == 0.0
+
+
+def _los_candidates() -> tuple:
+    grid = RadioMapGrid(center_m=(0.0, 0.0, UE_HEIGHT), size_m=(20.0, 20.0), cell_size_m=(1.0, 1.0))
+    gain = free_space_gain(grid, [(-30.0, 0.0, 20.0)])
+    los_mask = (grid.cell_centers()[:, :, 0] < 0.0)[None, :, :]
+    candidates = candidate_cells(
+        gain,
+        grid,
+        threshold=CoverageThreshold(mode="absolute_db", value=-200.0),
+        los_mask=los_mask,
+    )
+    assert candidates.count == 400
+    return candidates, grid, los_mask
+
+
+def test_los_fraction_quota() -> None:
+    candidates, _, _ = _los_candidates()
+    los = los_indicator(candidates.per_bs_los, "any")
+    expected = {0.0: 0, 0.25: 2, 0.5: 4, 0.6: 5, 1.0: 8}
+    for fraction, n_los in expected.items():
+        for seed in range(10):
+            sampled = sample_placements(
+                candidates,
+                8,
+                rng=np.random.default_rng(seed),
+                min_spacing_m=1.5,
+                los=los,
+                los_fraction=fraction,
+            )
+            assert int(np.sum(los[sampled.candidate_index])) == n_los
+    plain = sample_placements(candidates, 8, rng=np.random.default_rng(3))
+    with_los = sample_placements(candidates, 8, rng=np.random.default_rng(3), los=los)
+    np.testing.assert_array_equal(plain.candidate_index, with_los.candidate_index)
+    with pytest.raises(ValueError):
+        sample_placements(candidates, 8, rng=np.random.default_rng(0), los_fraction=0.5)
+    with pytest.raises(ValueError):
+        sample_placements(
+            candidates, 8, rng=np.random.default_rng(0), los=los[:-1], los_fraction=0.5
+        )
+    with pytest.raises(ValueError):
+        sample_placements(candidates, 8, rng=np.random.default_rng(0), los=los, los_fraction=1.5)
+    with pytest.raises(ValueError):
+        sample_placements(
+            candidates, 8, rng=np.random.default_rng(0), los=los, los_fraction=float("nan")
+        )
+
+
+def test_los_fraction_quota_unfillable() -> None:
+    grid = RadioMapGrid(center_m=(0.0, 0.0, UE_HEIGHT), size_m=(20.0, 20.0), cell_size_m=(1.0, 1.0))
+    gain = free_space_gain(grid, [(-30.0, 0.0, 20.0)])
+    los_mask = np.ones(grid.shape, dtype=bool)
+    los_mask.reshape(-1)[:3] = False
+    candidates = candidate_cells(
+        gain,
+        grid,
+        threshold=CoverageThreshold(mode="absolute_db", value=-200.0),
+        los_mask=los_mask,
+    )
+    los = los_indicator(candidates.per_bs_los, "any")
+    with pytest.raises(ValueError, match="NLoS"):
+        sample_placements(
+            candidates,
+            8,
+            rng=np.random.default_rng(0),
+            min_spacing_m=1.5,
+            los=los,
+            los_fraction=0.5,
+        )
+
+
+def test_candidate_cells_any_union_per_bs_threshold() -> None:
+    grid = RadioMapGrid(center_m=(0.0, 0.0, UE_HEIGHT), size_m=(4.0, 4.0), cell_size_m=(1.0, 1.0))
+    ny, nx = grid.shape
+    gain = np.zeros((2, ny, nx))
+    gain[0][:, 0:2] = 1e-6
+    gain[0][:, 2:4] = 1e-12
+    gain[1][:, 0] = 1e-16
+    gain[1][:, 1:4] = 1e-10
+    threshold = CoverageThreshold(mode="relative_to_max_db", value=30.0)
+    any_c = candidate_cells(gain, grid, threshold=threshold, aggregation="any")
+    assert any_c.count == 16
+    assert any_c.threshold_db == pytest.approx((-90.0, -130.0))
+    assert any_c.per_bs_passing == (8, 12)
+    gain_db = path_gain_db(gain)
+    np.testing.assert_allclose(any_c.gain_db, np.max(gain_db, axis=0)[any_c.mask])
+    all_c = candidate_cells(gain, grid, threshold=threshold, aggregation="all")
+    assert all_c.count == 4
+    assert all_c.per_bs_passing == (8, 12)
+    max_c = candidate_cells(gain, grid, threshold=threshold, aggregation="max")
+    assert max_c.count == 8
+    assert max_c.per_bs_passing is None
+    sum_c = candidate_cells(gain, grid, threshold=threshold, aggregation="sum")
+    assert sum_c.count == 8
+
+
+def test_candidate_cells_any_with_blind_bs() -> None:
+    grid = RadioMapGrid(center_m=(0.0, 0.0, UE_HEIGHT), size_m=(4.0, 4.0), cell_size_m=(1.0, 1.0))
+    ny, nx = grid.shape
+    gain = np.zeros((2, ny, nx))
+    gain[0][:, 0:2] = 1e-6
+    gain[1][:] = 0.0
+    bs = [(-30.0, 0.0, 20.0), (25.0, 25.0, 15.0)]
+    threshold = CoverageThreshold(mode="relative_to_max_db", value=30.0)
+    any_c = candidate_cells(gain, grid, threshold=threshold, aggregation="any")
+    bs0 = candidate_cells(gain[0][None, :, :], grid, threshold=threshold, aggregation="max")
+    assert any_c.count == bs0.count
+    assert np.isinf(any_c.threshold_db[1])
+    settings = CoveragePlacementSettings(
+        num_views=4,
+        placement_seed=0,
+        threshold=threshold,
+        aggregation="any",
+        orientation_policy="face_bs",
+    )
+    record = plan_coverage_placement(gain, grid, settings, bs_positions=bs).to_record()
+    assert record["threshold_db"][1] is None
+    json.dumps(record, allow_nan=False)
+
+
+def test_los_mask_validation() -> None:
+    grid = RadioMapGrid(center_m=(0.0, 0.0, UE_HEIGHT), size_m=(4.0, 4.0), cell_size_m=(1.0, 1.0))
+    ny, nx = grid.shape
+    gain = free_space_gain(grid, [(-30.0, 0.0, 20.0), (25.0, 25.0, 15.0)])
+    threshold = CoverageThreshold(mode="absolute_db", value=-200.0)
+    with pytest.raises(ValueError):
+        candidate_cells(gain, grid, threshold=threshold, los_mask=np.ones((3, ny, nx), bool))
+    with pytest.raises(ValueError):
+        candidate_cells(gain, grid, threshold=threshold, los_mask=np.ones((ny + 1, nx), bool))
+    mask = np.zeros((2, ny, nx), dtype=bool)
+    mask[0] = grid.cell_centers()[:, :, 0] < 0.0
+    candidates = candidate_cells(gain, grid, threshold=threshold, los_mask=mask)
+    np.testing.assert_array_equal(candidates.per_bs_los, mask[:, candidates.mask].T)
+    with pytest.raises(ValueError):
+        los_indicator(candidates.per_bs_los, "some")
+    with pytest.raises(ValueError):
+        los_indicator(np.ones((2, 2, 2), dtype=bool), "any")
+
+
+def test_plan_los_fraction_and_record() -> None:
+    grid = RadioMapGrid(center_m=(0.0, 0.0, UE_HEIGHT), size_m=(20.0, 20.0), cell_size_m=(1.0, 1.0))
+    bs = [(-30.0, 0.0, 20.0), (25.0, 25.0, 15.0)]
+    gain = free_space_gain(grid, bs)
+    centres = grid.cell_centers()
+    los_mask = np.stack([centres[:, :, 0] < 0.0, centres[:, :, 1] < 0.0], axis=0)
+    settings = CoveragePlacementSettings(
+        num_views=8,
+        placement_seed=0,
+        threshold=CoverageThreshold(mode="absolute_db", value=-200.0),
+        aggregation="any",
+        min_spacing_m=1.5,
+        los_fraction=0.5,
+        los_reference="all",
+        orientation_policy="face_bs",
+    )
+    placement = plan_coverage_placement(gain, grid, settings, bs_positions=bs, los_mask=los_mask)
+    record = placement.to_record()
+    assert record["sampler_version"] == 2
+    assert record["los"]["reference"] == "all"
+    assert (
+        record["los"]["candidates_los"] + record["los"]["candidates_nlos"]
+        == record["candidate_count"]
+    )
+    los_true = 0
+    for entry in record["views"]:
+        iy, ix = entry["cell_index"]
+        assert entry["los_bs"] == los_mask[:, iy, ix].tolist()
+        assert entry["los"] == all(entry["los_bs"])
+        if entry["los"]:
+            los_true += 1
+    assert los_true == 4
+    multi = record["multi_bs"]
+    assert multi["aggregation"] == "any"
+    assert multi["per_bs_threshold"] is True
+    assert multi["combine"] == "union"
+    assert len(multi["per_bs_passing_cells"]) == 2
+    assert all(isinstance(v, int) for v in multi["per_bs_passing_cells"])
+    json.dumps(record, allow_nan=False)
+
+    any_settings = CoveragePlacementSettings(
+        num_views=8,
+        placement_seed=0,
+        threshold=CoverageThreshold(mode="absolute_db", value=-200.0),
+        aggregation="any",
+        min_spacing_m=1.5,
+        los_fraction=0.5,
+        los_reference="any",
+        orientation_policy="face_bs",
+    )
+    any_record = plan_coverage_placement(
+        gain, grid, any_settings, bs_positions=bs, los_mask=los_mask
+    ).to_record()
+    assert sum(1 for e in any_record["views"] if e["los"] is True) == 4
+    for entry in any_record["views"]:
+        assert entry["los"] == any(entry["los_bs"])
+
+    no_los_settings = CoveragePlacementSettings(
+        num_views=8,
+        placement_seed=0,
+        threshold=CoverageThreshold(mode="absolute_db", value=-200.0),
+        aggregation="any",
+        min_spacing_m=1.5,
+        orientation_policy="face_bs",
+    )
+    no_mask = plan_coverage_placement(gain, grid, no_los_settings, bs_positions=bs)
+    no_record = no_mask.to_record()
+    assert no_record["los"] is None
+    assert all(entry["los_bs"] is None for entry in no_record["views"])
+    with pytest.raises(ValueError, match="LoS mask"):
+        plan_coverage_placement(gain, grid, settings, bs_positions=bs)
+
+
+def test_settings_los_round_trip() -> None:
+    settings = make_settings(los_fraction=0.25, los_reference="all")
+    rebuilt = CoveragePlacementSettings.from_dict(json.loads(json.dumps(settings.to_dict())))
+    assert rebuilt == settings
+    legacy = settings.to_dict()
+    legacy.pop("los_fraction")
+    legacy.pop("los_reference")
+    from_legacy = CoveragePlacementSettings.from_dict(legacy)
+    assert from_legacy.los_fraction is None
+    assert from_legacy.los_reference == "any"
+    for bad in (-0.1, 1.1, float("nan")):
+        with pytest.raises(ValueError):
+            make_settings(los_fraction=bad).validate()
+    with pytest.raises(ValueError):
+        make_settings(los_reference="some").validate()

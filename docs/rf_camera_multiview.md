@@ -239,7 +239,8 @@ PYTHONPATH=./src uv run python -m plateau_rt.cli.main rf-camera-multiview SCENE.
   --num-views 8 --ue-height-m 1.5 --target 5 5 5 \
   --bs-position -50 -50 30 --bs-position 60 35 25 \
   --rm-center 0 0 --rm-size 80 80 --rm-cell-size 1 1 \
-  --pl-threshold-mode relative_to_max_db --pl-threshold 30 \
+  --pl-threshold-mode relative_to_max_db --pl-threshold 30 --bs-aggregation any \
+  --los-reference all --los-fraction 0.5 \
   --building-clearance-m 1 --min-bs-distance-m 5 --min-ue-spacing-m 5
 ```
 
@@ -250,8 +251,10 @@ Coverage options:
 | `--placement` | `ring` | `ring` or `coverage` |
 | `--placement-seed` | `0` | dedicated placement seed |
 | `--pl-threshold-mode` | `relative_to_max_db` | `absolute_db`, `relative_to_max_db` or `percentile` |
-| `--pl-threshold` | `30` | dB (absolute / below max) or percentile |
-| `--bs-aggregation` | `max` | `max`, `sum` or `all` over base stations |
+| `--pl-threshold` | `50` | dB (absolute / below max) or percentile |
+| `--bs-aggregation` | `max` | multi-BS candidate rule: `max`, `sum`, `all` or `any` (see below) |
+| `--los-fraction` | none | share of views drawn from LoS cells (the rest from NLoS cells); none = no quota |
+| `--los-reference` | `any` | a cell is LoS when it sees `any` / `all` base stations |
 | `--orientation-policy` | `face_bs` | `look_at_target`, `face_bs` or `random_yaw` |
 | `--face-bs` | `strongest` | BS index or `strongest` for `face_bs` |
 | `--pitch-deg` | `0` | forward elevation for `random_yaw` |
@@ -263,7 +266,7 @@ Coverage options:
 | `--rm-size` | `100 100` | radio-map size x y [m] |
 | `--rm-cell-size` | `1 1` | cell size x y [m] |
 | `--rm-max-depth` | `5` | `RadioMapSolver` max_depth |
-| `--rm-samples-per-tx` | `1000000` | `RadioMapSolver` samples_per_tx |
+| `--rm-samples-per-tx` | `100000000` | `RadioMapSolver` samples_per_tx |
 | `--rm-seed` | `42` | `RadioMapSolver` seed (not the placement seed) |
 | `--radio-map` | none | reuse a saved radio map (json, `placement/` dir or dataset dir) |
 
@@ -274,13 +277,111 @@ with a horizontal `--building-clearance-m` dilation. Cells that are invalid
 (aggregated gain `<= 0` or non-finite), too close to a BS, below the threshold
 or excluded are never chosen.
 
-Invalid cells include Monte Carlo sampling holes, not only true shadow. On the
-mock city (1 BS, 120 m x 120 m, 1 m cells, 1e6 samples per transmitter), 22% of
-the cells get no ray; the share of outdoor cells left invalid grows with the
-distance to the BS (0% within 40 m, 15% at 70-100 m, 55% beyond 100 m), so
-the candidates, and hence the drawn UEs, lean towards the BS and towards
-line of sight. For large maps with small cells, raise `--rm-samples-per-tx`
-(1e7 cut the invalid cells from 3119 to 667) or coarsen `--rm-cell-size`.
+With `--cell-jitter`, the UE is moved inside its cell by up to half the jitter
+fraction of the cell size. The jitter is drawn for every candidate before the
+greedy spacing scan, so `--min-ue-spacing-m` holds between the jittered
+positions (placement records carry `sampler_version: 2`; records written
+before this change with a positive jitter cannot be replanned and are
+rejected).
+
+### Sampling holes and the `samples_per_tx` default
+
+A cell that no Monte Carlo ray reaches gets path gain 0 and is treated as
+invalid, so sampling holes remove far cells and bias the draw towards the BS.
+Measured on the mock city (1 BS at (-70, 5, 25), 120 m x 120 m map, 1 m cells,
+UE height 1.5 m, depth 5, 13228 outdoor cells after a 2 m building
+clearance; GPU RTX 2080 Ti). With `3e8` samples every outdoor cell is reached,
+so all of these invalid cells are sampling holes, not shadow:
+
+| samples_per_tx | outdoor cells with no ray | < 40 m | 40-70 m | 70-100 m | > 100 m |
+|---|---|---|---|---|---|
+| 1e5 | 48.7% | 0% | 12.1% | 61.0% | 88.6% |
+| 1e6 (old default) | 21.8% | 0% | 0.9% | 13.2% | 54.7% |
+| 3e6 | 12.7% | 0% | 0% | 4.3% | 35.0% |
+| 1e7 | 4.8% | 0% | 0% | 0.6% | 14.1% |
+| 3e7 | 1.4% | 0% | 0% | 0.2% | 4.0% |
+| **1e8 (default)** | **0.1%** | 0% | 0% | 0.1% | 0.3% |
+| 3e8 | 0% | 0% | 0% | 0% | 0% |
+
+(Distance bands are horizontal distances to the BS.) A map takes well under
+1 s on the GPU even at 1e8 samples and 4 base stations (0.25 s for 1 BS,
+0.57 s for 4 BSs), so the default is 1e8. On a CPU (LLVM) backend, lower it
+with `--rm-samples-per-tx`. The radio-map seed also moves cells across the
+threshold: between radio-map seeds 42 and 7, 1046 candidate cells flip at 1e6
+(30 dB threshold) and 203 at 1e8 (50 dB threshold).
+
+### Threshold and LoS / NLoS balance
+
+The radio map also stores a geometric LoS mask per BS: a shadow ray from each
+cell centre to the BS (`placement/radio_map_los_mask.npy`). It agrees exactly
+with an analytic segment-versus-box test on the 4 mock-city buildings (0
+mismatches over all outdoor cells, 2 BSs). Heavy CI Step 9 also checks it
+against the traced LoS path (`los_visibility` of the path GT) of every placed
+view; this also held for all 12 views of `make rf-camera-coverage-mock-city`.
+
+NLoS cells sit about 30 dB below the strongest cell (median -32 dB relative to
+the maximum, versus -8 dB for LoS cells), so the old 30 dB default kept mostly
+LoS cells. On the same mock city (1e8 samples, `--min-bs-distance-m 10`),
+35% of the outdoor cells are NLoS:
+
+| threshold (below max) | candidates | NLoS share of candidates |
+|---|---|---|
+| 30 dB (old default) | 9945 | 13.9% |
+| 40 dB | 12434 | 31.1% |
+| **50 dB (default)** | 12911 | 33.7% |
+| 60 dB | 13133 | 34.8% |
+
+50 dB below the maximum is about -118 dB path gain here, still about 13 dB
+above the thermal noise of a 100 MHz receiver with a 7 dB noise figure at the
+`--tx-power-dbm` default of 44 dBm. With 12
+views (`--min-ue-spacing-m 5`, 20 placement seeds), the mean number of NLoS
+views was 1.25 with the old defaults (1e6 samples, 30 dB) and 3.9 (min 2, max
+6) with the new defaults, close to the 35% share of the scene.
+
+`--los-fraction F` fixes the mix instead: `floor(F * num_views + 0.5)` views
+come from LoS cells and the rest from NLoS cells (one pass over the same
+random permutation, spacing checked across both groups). With `F = 0.5` every
+seed above gave exactly 6 NLoS views out of 12. With several BSs,
+`--los-reference any` calls a cell LoS when it sees at least one BS and `all`
+when it sees every BS. The manifest records per view `los_bs` (one flag per
+BS) and `los`, and a `los` block with the reference and the LoS / NLoS
+candidate counts. A saved map without a LoS mask (format version 1) still
+loads, but `--los-fraction` then fails with a clear error.
+
+### Multi-BS candidate rules
+
+`--bs-aggregation` decides which cells are candidates when there are several
+BSs:
+
+| rule | threshold | a cell is a candidate when |
+|---|---|---|
+| `max` | one threshold on the max over BSs | the strongest BS passes |
+| `sum` | one threshold on the summed gain | the summed gain passes |
+| `all` | one threshold per BS (each resolved on its own map) | every BS passes (intersection) |
+| `any` | one threshold per BS (each resolved on its own map) | at least one BS passes (union) |
+
+For `max` and `sum`, a relative or percentile threshold is resolved on the
+combined map, so a BS that is weaker overall (farther away, lower or
+obstructed) loses its own coverage area. `any` keeps it, because each BS gets
+its own reference. The manifest `placement.multi_bs` block records the rule,
+whether the thresholds are per BS, the combination (`union` / `intersection`)
+and, for the per-BS rules, how many eligible cells pass each BS threshold;
+`threshold_db` lists one threshold per BS for `all` / `any` (`null` when a BS
+reaches no eligible cell).
+
+On the mock city with two BSs at (-70, 5, 25) and (60, -40, 20) (1e8 samples,
+13228 eligible cells), both BSs have similar peaks (-67.8 and -66.5 dB), so
+`max`, `sum` and `any` nearly coincide:
+
+| threshold | max | sum | any | all |
+|---|---|---|---|---|
+| 30 dB | 13207 | 13227 | 13220 | 7153 |
+| 50 dB | 13228 | 13228 | 13228 | 12825 |
+
+Only 4.2% of these cells see neither BS, and 34.9% see both. `all` at 30 dB
+keeps mostly cells that see both BSs (64.5%). Use `any` when the BSs differ in
+strength, and `all` when every view must be well lit by every BS (for example,
+tomography with all BSs per view).
 
 ### Reproducibility
 
@@ -292,10 +393,12 @@ OUT/placement/
   radio_map.json
   radio_map_path_gain.npy     # float32 [num_bs, ny, nx], linear
   radio_map_indoor_mask.npy   # bool [ny, nx]
+  radio_map_los_mask.npy      # bool [num_bs, ny, nx], geometric LoS per BS
 ```
 
-`radio_map.json` records the scene, carrier, base stations, grid and solver
-settings plus the sha256 of both `.npy` files. Passing the saved map back with
+`radio_map.json` (format version 2) records the scene, carrier, base stations,
+transmit antenna (`antenna.tx_pattern`, `antenna.polarization`), grid and
+solver settings plus the sha256 of every `.npy` file. Passing the saved map back with
 `--radio-map` reuses the exact float32 arrays, so `saved map + placement_seed`
 reproduces the poses exactly; the placement is recorded in the manifest
 `placement` section, from which the views can be rebuilt:
@@ -305,13 +408,20 @@ from plateau_rt.application.ue_placement import replan_from_manifest
 placement = replan_from_manifest("OUT")   # saved map + seed -> identical poses
 ```
 
-Reusing a map requires the same carrier, base stations and UE height (checked
-before tracing); `--rm-*` options are ignored then. The scene itself is not
+Reusing a map requires the same carrier, base stations, UE height, transmit
+pattern and polarization (checked before tracing; a version 1 map records no
+antenna and is therefore rejected for reuse, but still replans); `--rm-*`
+options are ignored then. The scene itself is not
 hashed: a map computed on a different scene file only prints a warning, so keep
 the map with the scene it was computed on. `--radio-map` is rejected with
 `--placement ring`. Changing only
 `--placement-seed` changes only the placement (and the traced views): every
 other manifest section stays equal.
+
+The radio-map adapter and the dataset tracing build the scene with the same
+helper (`prepare_rf_camera_scene` in
+`src/plateau_rt/adapters/sionna/rf_camera_dataset.py`), so the carrier, arrays,
+antenna patterns and transmitter order always match.
 
 ## Expected Sionna CFR shape
 
