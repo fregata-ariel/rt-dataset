@@ -1,11 +1,12 @@
 # syntax=docker/dockerfile:1
 #
-# このファイル1本から4つのイメージを作る (docker compose build base prod dev viewer)
+# このファイル1本から5つのイメージを作る (docker compose build base prod dev viewer viewer-e2e)
 #   base : CUDA base + OS ライブラリ + uv + Python。プロジェクトに依存しない土台
 #   prod : 本番。uv.lock 通りの依存 (test グループを含む) + src。CI もこのイメージで実行する
 #   dev  : Devcontainer。prod と同じ依存 + 開発ツール (jupyter, ty, git, sudo など) + src
 #   viewer : Web viewer。CUDA なしの中間ステージ viewer-base (ubuntu:24.04 + uv + Python) に
 #            viewer グループだけを入れる (Sionna / Mitsuba / Dr.Jit なし)。CI の viewer smoke が使う
+#   viewer-e2e : ブラウザ smoke test。viewer-base に e2e グループ (Playwright) と Chromium と tests/
 # prod と dev は中間ステージ deps (依存のみ、src なし) から分岐し、src は最後にコピーする。
 # src の変更で dev の apt-get / 依存の層を作り直さないため (ネットワーク依存を減らす)。
 #
@@ -146,3 +147,23 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --start-interval=1s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=4)"]
 CMD ["python", "-m", "plateau_rt.viewer", "serve", "--host", "0.0.0.0", "--port", "8000", "--data", "/data"]
+
+# ---------------------------------------------------------------------------- viewer-e2e
+FROM viewer-base AS viewer-e2e
+
+# ブラウザ smoke test (V0-8 #43): Playwright の Python 版 + Chromium (headless shell)。
+# viewer 本体 (src/) は入れない。試験は別コンテナで起動した viewer に VIEWER_URL で接続する
+COPY --chown=app:app pyproject.toml uv.lock .python-version ./
+COPY --chown=app:app third_party/sionna-rt/pyproject.toml third_party/sionna-rt/pyproject.toml
+RUN --mount=type=cache,target=/home/app/.cache/uv,uid=1000,gid=1000 \
+    uv sync --locked --only-group e2e
+# Chromium と OS ライブラリ (--with-deps は apt-get を使うので root で実行する)。
+# ブラウザは共通の場所に置き、CI の任意の UID から読めるようにする
+USER root
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN playwright install --with-deps --only-shell chromium \
+    && chmod -R a+rX /opt/ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+USER app
+COPY --chown=app:app tests/ tests/
+CMD ["python", "-m", "pytest", "-p", "no:cacheprovider", "-v", "tests/e2e"]

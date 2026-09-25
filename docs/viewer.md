@@ -587,8 +587,34 @@ recorded `modification`, and refresh `sha256`/`upstream_sha256`.
 1. Write `static/js/panels/<id>.js` exporting the panel object (`{id, title, kinds, mount, update,
    unmount}`).
 2. Add one line to `PANELS` in `panels/registry.js`.
-3. Add one `(panel_id, state)` case to the browser smoke test of V0-8 (#43).
+3. Add one `(panel_id, state)` line to `PANEL_CASES` in `tests/e2e/test_panels.py`.
 4. Put new UI strings in `strings.js`.
+
+## Browser smoke tests
+
+The browser smoke tests (`tests/e2e`, run with `scripts/ci/run-viewer-e2e.sh`) drive the
+real frontend in Chromium (Playwright): upload flows including rejected bundles, overview
+values, `npy.js`, hash state round-trip and reload, and one case per panel (`PANEL_CASES`
+in `tests/e2e/test_panels.py`).
+
+`tests/e2e/conftest.py` provides the shared helpers:
+
+- `api_upload`: upload an archive through the HTTP API and return its digest.
+- `upload_bundle`: upload an archive through the home panel UI and return its digest.
+- `upload_expect_error`: upload a bad archive through the UI and return its error fields.
+- `open_panel`: open a panel by hash, wait until its derivation finished, and return its root.
+- `wait_panel`: wait until the mounted panel finished loading without an error view.
+- `assert_no_console_errors`: fail on unexpected console errors and page errors.
+- `save_screenshot`: save a full-page screenshot to the report dir.
+- `assert_state_roundtrip`: push state through the store, check the hash round-trips,
+  reload and check the state persists.
+- `bundle_digests`: session fixture uploading `bundle.zip` and `bundle_v2.zip` once.
+
+To add a panel case, append one `(panel_id, state)` line to `PANEL_CASES` in
+`tests/e2e/test_panels.py` (plus a `PANEL_ROOT_CHECK` entry when the panel root needs a
+different probe) and run
+`scripts/ci/build-images.sh viewer viewer-e2e && scripts/ci/run-viewer-e2e.sh -k <panel_id>`.
+See [docs/ci.md](ci.md) for how the suite runs in CI.
 
 ## Adding a slice (backend)
 

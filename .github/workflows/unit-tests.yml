@@ -43,6 +43,18 @@ jobs:
       - name: Viewer smoke (light image)
         run: scripts/ci/run-viewer-smoke.sh
 
+      - name: Viewer browser smoke (Playwright)
+        run: scripts/ci/run-viewer-e2e.sh
+
+      - name: Upload viewer browser smoke report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: viewer-e2e-report
+          path: ci-reports/viewer-e2e/
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@v7

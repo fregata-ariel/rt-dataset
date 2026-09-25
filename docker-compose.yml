@@ -3,6 +3,7 @@
 #   prod : ${IMAGE_PREFIX}       本番 (uv.lock 通りの依存 + test ツール + src)。CI もこれを使う
 #   dev  : ${IMAGE_PREFIX}-dev   Devcontainer 用 (prod と同じ依存 + 開発ツール + src)
 #   viewer : ${IMAGE_PREFIX}-viewer  CUDA/Sionna なしの viewer (viewer グループのみ + src)
+#   viewer-e2e : ${IMAGE_PREFIX}-viewer-e2e  ブラウザ smoke test (Playwright + Chromium + tests)
 #
 # IMAGE_PREFIX: イメージ名の接頭辞 (既定: plateau-sionna)。
 #   CI は別の接頭辞を使い、開発者のイメージタグを上書きしない。
@@ -104,3 +105,26 @@ services:
       VIEWER_MAX_CONCURRENT_DERIVES: ${VIEWER_MAX_CONCURRENT_DERIVES:-2}
     # 派生の子プロセス (VIEWER_DERIVE_MEM_BYTES x VIEWER_MAX_CONCURRENT_DERIVES = 6 GiB) + server より大きく
     mem_limit: ${VIEWER_MEM_LIMIT:-8g}
+
+  # ブラウザ smoke test (Playwright + Chromium)。scripts/ci/run-viewer-e2e.sh が同じ compose
+  # プロジェクトの viewer と組にして使う。viewer のネットワーク名前空間を共有するので、
+  # viewer には http://127.0.0.1:8000 で接続する (VIEWER_ALLOWED_HOSTS の既定と一致する)
+  viewer-e2e:
+    image: ${IMAGE_PREFIX:-plateau-sionna}-viewer-e2e:latest
+    build:
+      <<: *build
+      target: viewer-e2e
+    profiles:
+      - e2e
+    network_mode: "service:viewer"
+    user: "${CI_UID:-1000}:${CI_GID:-1000}"
+    # tests/ はチェックアウトのものを使う (イメージ内の tests/ はイメージ単体で使う場合の既定)
+    volumes:
+      - ./tests:/app/tests:ro
+      - ${VIEWER_E2E_DIR:-./ci-reports/viewer-e2e}:/app/ci-reports/viewer-e2e
+    environment:
+      VIEWER_URL: http://127.0.0.1:8000
+      VIEWER_E2E_FIXTURES: /app/ci-reports/viewer-e2e/fixtures
+      HOME: /tmp
+      PYTHONDONTWRITEBYTECODE: "1"
+    shm_size: 1g

@@ -52,15 +52,16 @@ float の最下位桁が変わることがある)。そのため生成物の検�
 ランナーと同じスクリプトをそのまま実行できます。
 
 ```bash
-scripts/ci/build-images.sh     # base, prod, viewer (引数で dev も: build-images.sh base prod dev)
+scripts/ci/build-images.sh     # base, prod, viewer, viewer-e2e (引数で dev も: build-images.sh base prod dev)
 scripts/ci/run-lint.sh         # ruff check / format --check
 scripts/ci/run-unit-tests.sh   # 単体テスト
 scripts/ci/run-viewer-smoke.sh # 軽量 viewer イメージの smoke (要: build-images.sh で viewer をビルド)
+scripts/ci/run-viewer-e2e.sh   # ブラウザ smoke (要: build-images.sh で viewer と viewer-e2e をビルド、引数は pytest に渡る)
 scripts/ci/run-heavy.sh        # 節目の重い処理 (GPU)
 ```
 
 CI 用イメージは `plateau-sionna-ci`, `plateau-sionna-ci-base`, `plateau-sionna-ci-dev`,
-`plateau-sionna-ci-viewer`
+`plateau-sionna-ci-viewer`, `plateau-sionna-ci-viewer-e2e`
 という名前でビルドされ、開発者の `plateau-sionna*` は上書きしません (`IMAGE_PREFIX` で切り替え)。
 節目の CI では dev イメージもビルドし、Devcontainer が壊れていないことも確認します。
 コンテナはランナーと同じ UID (既定 1000 = イメージの `app` ユーザー) で実行されるため、
@@ -97,6 +98,58 @@ CI 用イメージは `plateau-sionna-ci`, `plateau-sionna-ci-base`, `plateau-si
 
 viewer image の大きさ: 約 426 MB (406 MiB、`docker image inspect -f '{{.Size}}'`、2026-09 時点の目安)。
 本番イメージ (prod, CUDA + Sionna) は約 1.34 GB です。smoke 全体はキャッシュ有で 10 秒未満です。
+
+### Viewer browser smoke (`scripts/ci/run-viewer-e2e.sh`)
+
+Playwright (Chromium) で viewer のブラウザ smoke テスト (`tests/e2e`) を回します。手順は以下の通りです。
+
+1. fixture の作成 (`ci` サービスで `tests/viewer_bundle_fixtures.py`): 正常な bundle (v3 / v2)、
+   壊れた manifest の bundle、危険なアーカイブと `expected.json` を
+   `ci-reports/viewer-e2e/fixtures/` に置く
+2. viewer サービスの起動 (独自の compose プロジェクトで `up -d --no-build --wait viewer`;
+   空いているポート、一時的な store、`--wait` で healthcheck 待ち)
+3. `viewer-e2e` コンテナで pytest (`viewer` のネットワーク名前空間を共有するので
+   `http://127.0.0.1:8000` で接続): Chromium で `tests/e2e` を実行
+   (失敗時のみ trace とスクリーンショットを残す)
+4. 終了時は必ず `down -v` し、そのプロジェクトのコンテナ・ボリューム・ネットワークが
+   残っていないことも確認する (残っていれば失敗にする)
+
+出力は `ci-reports/viewer-e2e/` 以下に置かれます: `junit.xml`、viewer のログ `viewer.log`、
+`screenshots/`、失敗時は `test-results/<test>/trace.zip` と `test-failed-*.png`。
+trace は `playwright show-trace trace.zip` か https://trace.playwright.dev で見られます。
+CI では `viewer-e2e-report` アーティファクトとして 14 日間保存されます。
+
+テストの層 (V0-D4 (#30) の決定):
+
+| 層 | 対象 | 実行場所 |
+|---|---|---|
+| backend 単体 | store、展開、種別判定、各 deriver (向き、左右反転、hemisphere、マーカー位置、delay の折り返し、gauge を含む) | unit CI (pytest、push ごと) |
+| 決定性 | 各 deriver を別々の store で 2 回実行し、全出力のバイト列が一致する (`assert_deterministic`) | unit CI |
+| API | FastAPI の `TestClient` で upload から派生ファイルの取得まで (加えて `run-viewer-smoke.sh` が実コンテナで確認) | unit CI |
+| 境界 | viewer の全モジュールが sionna / mitsuba / drjit / matplotlib を import しない | unit CI |
+| ブラウザ smoke | 合成 bundle のアップロード、各 panel を開いて console error がないこと・主要な要素があること、`npy.js` と URL 状態の往復 (`tests/e2e`) | unit CI (`run-viewer-e2e.sh`、viewer-e2e イメージ) |
+| 実データ | heavy CI の mock / coverage mock / T22 の smoke 出力で、取り込み、全派生、物理の確認、スクリーンショット | heavy CI (V1-13 #63、V2-2 #66、V3-5 #74) |
+
+正しさに関わる計算は Python の deriver で pytest により検証し、ブラウザ smoke は「描けること」
+だけを確かめます。
+
+prod イメージには playwright が入っていないため、prod イメージ上の `pytest tests` では
+`tests/e2e` は skip されます (VIEWER_URL 未設定の場合も skip)。
+テストコードはチェックアウトの `./tests` をマウントして使う一方、フロントエンドは
+viewer イメージ内のものが使われるため、フロントエンドを変えたらローカル実行の前に
+`build-images.sh viewer` で入れ直してください。
+
+所要時間 (2026-09 の実測、キャッシュ有): `build-images.sh` 全体が 3〜16 秒、`run-viewer-e2e.sh` が 10〜30 秒 (17 テスト)。
+unit CI への増分は 1 分未満です。frontend が壊れていると各テストが待ち時間 (30 秒) で失敗するため、失敗時は数分かかります。viewer-e2e イメージの初回ビルドは Chromium の取得を含め約 1 分です。
+viewer-e2e イメージの大きさ: 約 1.09 GB (Chromium headless shell と OS ライブラリを含む、2026-09 時点の目安)。
+
+#### panel のケースの足し方
+
+`tests/e2e/test_panels.py` の `PANEL_CASES` に `(panel_id, state)` を1行足し
+(必要なら `PANEL_ROOT_CHECK` に root の selector も追加)、
+`scripts/ci/build-images.sh viewer viewer-e2e && scripts/ci/run-viewer-e2e.sh -k <panel_id>`
+で回します。panel 固有の表示状態 (選択・数量・範囲) は `assert_state_roundtrip` で確認します。
+スクリーンショットはアーティファクトとして残るだけで、ピクセル一致は検証しません。
 
 ## セルフホストランナー
 
