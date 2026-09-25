@@ -236,6 +236,11 @@ class SeparableOperator:
         return self._beta_model
 
     @property
+    def geom(self) -> CaptureGeometry:
+        """Capture geometry the operator was built on."""
+        return self._geom
+
+    @property
     def y_shape(self) -> tuple[int, ...]:
         """Shape of the CFR ``Y``."""
         return self._y_shape
