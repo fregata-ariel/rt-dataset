@@ -33,10 +33,12 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.experimental.rf_scatterer_fit",
     "plateau_rt.experimental.rf_scatterer_study",
     "plateau_rt.experimental.compare_direct_path",
-    # Every tomography module (docs/tomography_baselines.md §7.3).
+    # Every tomography module, subpackages included (docs/tomography_baselines.md §7.3).
     *(
-        f"{rf_tomography.__name__}.{info.name}"
-        for info in pkgutil.iter_modules([str(Path(rf_tomography.__file__).parent)])
+        info.name
+        for info in pkgutil.walk_packages(
+            [str(Path(rf_tomography.__file__).parent)], prefix=f"{rf_tomography.__name__}."
+        )
     ),
 ]
 
