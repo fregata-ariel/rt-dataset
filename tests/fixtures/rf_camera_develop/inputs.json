@@ -1,0 +1,118 @@
+{
+  "description": "Inputs of the RF-camera development golden (see make_golden.py)",
+  "seed": 20260925,
+  "noise_std": 0.01,
+  "plane_waves": [
+    {
+      "hemisphere": "front",
+      "ky_over_k": 0.31,
+      "kz_over_k": -0.12,
+      "delay_s": 2.3e-08,
+      "amplitude": [
+        1.0,
+        0.0
+      ]
+    },
+    {
+      "hemisphere": "front",
+      "ky_over_k": -0.45,
+      "kz_over_k": 0.27,
+      "delay_s": 7.1e-08,
+      "amplitude": [
+        0.35,
+        -0.2
+      ]
+    },
+    {
+      "hemisphere": "back",
+      "ky_over_k": 0.12,
+      "kz_over_k": 0.41,
+      "delay_s": 4.7e-08,
+      "amplitude": [
+        0.6,
+        0.3
+      ]
+    },
+    {
+      "hemisphere": "back",
+      "ky_over_k": -0.62,
+      "kz_over_k": -0.18,
+      "delay_s": 1.31e-07,
+      "amplitude": [
+        0.25,
+        0.1
+      ]
+    }
+  ],
+  "hemispheres": [
+    "front",
+    "back"
+  ],
+  "aperture_axis_order": [
+    "hemisphere",
+    "row",
+    "col",
+    "freq"
+  ],
+  "config": {
+    "carrier_frequency_hz": 3500000000.0,
+    "bandwidth_hz": 100000000.0,
+    "num_frequency_bins": 16,
+    "tx_positions": [
+      [
+        -50.0,
+        -50.0,
+        30.0
+      ]
+    ],
+    "tx_look_at": [
+      5.0,
+      5.0,
+      5.0
+    ],
+    "tx_look_ats": null,
+    "rx_rows": 8,
+    "rx_cols": 8,
+    "vertical_spacing_lambda": 0.5,
+    "horizontal_spacing_lambda": 0.5,
+    "tx_pattern": "tr38901",
+    "polarization": "V",
+    "fft_rows": 32,
+    "fft_cols": 32,
+    "phase_floor_db": -35.0,
+    "max_depth": 5,
+    "synthetic_array": true,
+    "seed": 42
+  },
+  "view": {
+    "view_id": "ue_000000",
+    "position": [
+      35.0,
+      5.0,
+      1.5
+    ],
+    "look_at": [
+      5.0,
+      5.0,
+      5.0
+    ],
+    "orientation": [
+      3.141592653589793,
+      -0.11614162687999019,
+      0.0
+    ]
+  },
+  "bs_id": "bs_000",
+  "bs_position": [
+    -50.0,
+    -50.0,
+    30.0
+  ],
+  "outputs": [
+    "angular_cfr_center",
+    "angular_power_center",
+    "phase_valid_mask",
+    "dominant_delay_s",
+    "dominant_delay_power"
+  ]
+}
