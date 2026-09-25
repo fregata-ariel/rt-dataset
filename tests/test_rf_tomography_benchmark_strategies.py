@@ -380,7 +380,10 @@ def test_runner_all_strategies(strategy_run: dict[str, Any]) -> None:
                     keys |= {"phase_rms_deg", "phase_max_deg"}
                 if "tau" in cfg.gauge_unknowns:
                     keys |= {"delay_rms_ns", "delay_max_ns"}
-                assert set(errors) == keys | {"estimated", "by_los"}, (name, sorted(errors))
+                expected = keys | {"estimated", "by_los"}
+                if row["strategy"] == "los":
+                    expected |= {"los_fit"}
+                assert set(errors) == expected, (name, sorted(errors))
                 for key in keys:
                     assert np.isfinite(errors[key]), (name, key)
                 assert set(errors["by_los"]) == {"los_visible", "los_blocked"}

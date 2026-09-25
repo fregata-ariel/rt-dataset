@@ -189,6 +189,59 @@ def _strategy_of(cfg: Config, strategy: str) -> Any:
     raise ValueError(f"unknown strategy {strategy!r} for config {cfg.name!r}")
 
 
+def los_fit_summary(
+    info: Mapping[str, Any], los_amp_model_error_db: np.ndarray | None
+) -> dict[str, Any]:
+    """Summarize the LoS amplitude fit of ``info`` against the GT model error."""
+    fitted = np.asarray(info["fitted"], dtype=bool)
+    gains = np.asarray(info["g_los"], dtype=np.float64)
+    num_views, num_bs = fitted.shape
+    g_los_db: list[list[float | None]] = []
+    for view in range(num_views):
+        row: list[float | None] = []
+        for bs in range(num_bs):
+            if bool(fitted[view, bs]) and float(gains[view, bs]) > 0.0:
+                row.append(float(20.0 * np.log10(float(gains[view, bs]))))
+            else:
+                row.append(None)
+        g_los_db.append(row)
+    if los_amp_model_error_db is None:
+        return {
+            "fitted": fitted.tolist(),
+            "num_fitted": int(np.count_nonzero(fitted)),
+            "g_los_db": g_los_db,
+            "amp_error_db": None,
+            "amp_error_db_max": None,
+        }
+    model = np.asarray(los_amp_model_error_db, dtype=np.float64)
+    if model.shape != fitted.shape:
+        raise ValueError("los_amp_model_error_db must have the gauge [V, B] shape")
+    amp_error_db: list[list[float | None]] = []
+    best = 0.0
+    found = False
+    for view in range(num_views):
+        row = []
+        for bs in range(num_bs):
+            estimated = g_los_db[view][bs]
+            reference = float(model[view, bs])
+            if estimated is not None and np.isfinite(reference):
+                value = float(estimated - reference)
+                row.append(value)
+                if not found or abs(value) > best:
+                    best = abs(value)
+                found = True
+            else:
+                row.append(None)
+        amp_error_db.append(row)
+    return {
+        "fitted": fitted.tolist(),
+        "num_fitted": int(np.count_nonzero(fitted)),
+        "g_los_db": g_los_db,
+        "amp_error_db": amp_error_db,
+        "amp_error_db_max": float(best) if found else None,
+    }
+
+
 def estimate_gauges(
     cfg: Config,
     strategy: str,
@@ -202,6 +255,7 @@ def estimate_gauges(
     n_iter: int,
     sigma_t: float | str,
     points: np.ndarray | None = None,
+    los_visible: np.ndarray | None = None,
 ) -> GaugeEstimate:
     """Estimate the N-mode gauges of ``Y`` with the registered ``strategy``.
 
@@ -218,18 +272,35 @@ def estimate_gauges(
         raise ValueError("the oracle strategy is handled by the runner")
     strat = _strategy_of(cfg, strategy)
     if strategy == "los":
+        if los_visible is None:
+            mask = np.ones((num_views, num_bs), dtype=bool)
+        else:
+            try:
+                mask = np.asarray(los_visible, dtype=bool)
+            except (TypeError, ValueError) as error:
+                raise ValueError("los_visible must have the gauge [V, B] shape") from error
+            if mask.shape != (num_views, num_bs):
+                raise ValueError("los_visible must have the gauge [V, B] shape")
+            mask = np.asarray(mask, dtype=bool)
         phi = np.zeros((num_views, num_bs), dtype=np.float64)
         tau = np.zeros((num_views, num_bs), dtype=np.float64)
-        resid = np.zeros((num_views, num_bs), dtype=np.float64)
+        resid = np.full((num_views, num_bs), np.nan, dtype=np.float64)
+        g_los = np.full((num_views, num_bs), np.nan, dtype=np.float64)
         for view in range(num_views):
             for bs in range(num_bs):
+                if not bool(mask[view, bs]):
+                    continue
                 result = strat.fn(data[view, bs], geom, view, bs, **dict(strat.kwargs))
                 phase = float(result["phi"])
                 phi[view, bs] = phase if np.isfinite(phase) else 0.0
                 tau[view, bs] = float(result["tau"])
                 resid[view, bs] = float(result["resid"])
+                g_los[view, bs] = float(result["g_los"])
         return GaugeEstimate(
-            phi=phi, tau=tau, estimates=tuple(strat.estimates), info={"resid": resid}
+            phi=phi,
+            tau=tau,
+            estimates=tuple(strat.estimates),
+            info={"resid": resid, "fitted": mask.copy(), "g_los": g_los},
         )
     if strategy == "blind":
         factory, keywords = strat.aux["bp_fn"]
@@ -379,20 +450,43 @@ def gauge_error_summary(
             raise ValueError("los_visible must have the gauge [V, B] shape") from error
         if mask.shape != np.asarray(errors.phase).shape:
             raise ValueError("los_visible must have the gauge [V, B] shape")
+        used_phi = np.asarray(used[0], dtype=np.float64)
+        used_tau = np.asarray(used[1], dtype=np.float64)
+        true_phi = np.asarray(truth[0], dtype=np.float64)
+        true_tau = np.asarray(truth[1], dtype=np.float64)
         by_los: dict[str, Any] = {}
         for key, selected in zip(gt_app.LOS_STRATA, (mask, ~mask), strict=True):
             count = int(np.count_nonzero(selected))
-            entry: dict[str, Any] = {"num": count}
-            if "phi" in cfg.gauge_unknowns:
-                picked = np.abs(np.asarray(errors.phase, dtype=np.float64)[selected])
-                entry["phase_rms_deg"] = (
-                    float(np.rad2deg(np.sqrt(np.mean(picked**2)))) if count else None
+            entry: dict[str, Any] = {"num": count, "captures": np.argwhere(selected).tolist()}
+            if count:
+                errs = metric_mod.gauge_errors(
+                    (used_phi[selected], used_tau[selected]),
+                    (true_phi[selected], true_tau[selected]),
+                    period=float(period),
                 )
-                entry["phase_max_deg"] = float(np.rad2deg(np.max(picked))) if count else None
+            else:
+                errs = None
+            if "phi" in cfg.gauge_unknowns:
+                if errs is None:
+                    entry["phase_deg"] = []
+                    entry["phase_rms_deg"] = None
+                    entry["phase_max_deg"] = None
+                else:
+                    signed = np.asarray(errs.phase, dtype=np.float64)
+                    entry["phase_deg"] = np.degrees(signed).tolist()
+                    picked = np.abs(signed)
+                    entry["phase_rms_deg"] = float(np.rad2deg(np.sqrt(np.mean(picked**2))))
+                    entry["phase_max_deg"] = float(np.rad2deg(np.max(picked)))
             if "tau" in cfg.gauge_unknowns:
-                picked = np.abs(np.asarray(errors.delay, dtype=np.float64)[selected])
-                entry["delay_rms_ns"] = float(1e9 * np.sqrt(np.mean(picked**2))) if count else None
-                entry["delay_max_ns"] = float(1e9 * np.max(picked)) if count else None
+                if errs is None:
+                    entry["delay_ns"] = []
+                    entry["delay_rms_ns"] = None
+                    entry["delay_max_ns"] = None
+                else:
+                    delays = np.asarray(errs.delay, dtype=np.float64)
+                    entry["delay_ns"] = (1e9 * delays).tolist()
+                    entry["delay_rms_ns"] = float(1e9 * np.sqrt(np.mean(delays**2)))
+                    entry["delay_max_ns"] = float(1e9 * np.max(delays))
             by_los[key] = entry
         if los_model_error is not None:
             try:
@@ -406,6 +500,11 @@ def gauge_error_summary(
             by_los["los_visible"]["los_model_error_deg_max"] = (
                 float(np.max(visible_err)) if visible_err.size else None
             )
+            per_capture: list[float | None] = []
+            for view, bs in by_los["los_visible"]["captures"]:
+                value = float(np.degrees(model_err[int(view), int(bs)]))
+                per_capture.append(value if np.isfinite(value) else None)
+            by_los["los_visible"]["los_model_error_deg"] = per_capture
         summary["by_los"] = by_los
     return summary
 
@@ -836,6 +935,8 @@ def run_benchmark(
     dataset_seed: int = 0,
     overwrite: bool = False,
     workers: int = 1,
+    bs: Sequence[int] | None = None,
+    num_bins: int | None = None,
 ) -> BenchmarkRun:
     """Run the tomography benchmark and stream rows, recon arrays and the manifest.
 
@@ -852,6 +953,8 @@ def run_benchmark(
     space_list = _resolve_spaces(spaces, suite_obj)
     strategy_filter = None if strategies is None else list(strategies)
     data = dataset if isinstance(dataset, tio.TomographyDataset) else tio.load_dataset(dataset)
+    if bs is not None or num_bins is not None:
+        data = tio.select_captures(data, bs=bs, num_bins=num_bins)
     if data.tx_pattern is not None and data.tx_pattern not in SUPPORTED_TX_PATTERNS:
         raise ValueError(
             f"dataset tx_pattern {data.tx_pattern!r} is not modelled; the tomography operators "
@@ -879,6 +982,8 @@ def run_benchmark(
         float(grid_spacing) if grid_spacing is not None else suite_obj.grid_spacing,
     )
     ground_truth = tio.find_ground_truth(data, gt_path)
+    if ground_truth is not None and "bs" in data.selection:
+        ground_truth = tio.select_ground_truth(ground_truth, data.selection["bs"])
     geom = data.geom
     num_views, num_bs = geom.num_views, geom.num_bs
     period = float(geom.delay_period)
@@ -998,6 +1103,8 @@ def run_benchmark(
         collected,
         counts,
         runtime_s,
+        bs,
+        num_bins,
     )
     tio.write_run_manifest(manifest_path, manifest)
     return BenchmarkRun(
@@ -1264,6 +1371,7 @@ def _run_chain(  # noqa: PLR0913
         np.zeros((num_views, num_bs), dtype=np.float64),
     )
     gauge_start = time.perf_counter()
+    estimated: GaugeEstimate | None = None
     try:
         if strategy == "none":
             gauges_used: tuple[np.ndarray, np.ndarray] | None = None
@@ -1288,6 +1396,7 @@ def _run_chain(  # noqa: PLR0913
                 ref=ref,
                 n_iter=suite_obj.e2_iterations,
                 sigma_t=suite_obj.sigma_t,
+                los_visible=data.los_visible,
             )
             gauges_used = used_gauges(cfg, estimated)
             estimates = tuple(estimated.estimates)
@@ -1311,6 +1420,12 @@ def _run_chain(  # noqa: PLR0913
             los_model_error=model_error,
         )
         gauge_payload["runtime_s"] = gauge_runtime
+        if strategy == "los" and estimated is not None:
+            gt_arrays = ground_truth.arrays if ground_truth is not None else {}
+            gauge_payload["los_fit"] = los_fit_summary(
+                estimated.info,
+                gt_arrays.get("los_amp_model_error_db") if ground_truth is not None else None,
+            )
     if cfg.e1 is None:
         reason = "; ".join(cfg.planned) if cfg.planned else "no E1 step"
         _emit_row(
@@ -1893,6 +2008,8 @@ def _run_manifest(  # noqa: PLR0913
     collected: list[dict[str, Any]],
     counts: dict[str, int],
     runtime_s: float,
+    bs: Sequence[int] | None = None,
+    num_bins: int | None = None,
 ) -> dict[str, Any]:
     """Assemble the run-manifest payload of a finished benchmark."""
     manifest = data.manifest
@@ -1938,6 +2055,8 @@ def _run_manifest(  # noqa: PLR0913
             else np.asarray(grid_half_size, dtype=np.float64).tolist(),
             "grid_spacing": None if grid_spacing is None else float(grid_spacing),
             "dataset_seed": int(dataset_seed),
+            "bs": None if bs is None else [int(value) for value in bs],
+            "num_bins": None if num_bins is None else int(num_bins),
         },
         "versions": tio.software_versions(),
         "dataset": {
@@ -1954,6 +2073,7 @@ def _run_manifest(  # noqa: PLR0913
             "los_visible_source": data.los_visible_source,
             "los_visible": np.asarray(data.los_visible, dtype=bool).tolist(),
             "hashes": dict(data.hashes),
+            "selection": tio.to_jsonable(dict(data.selection)),
         },
         "suite": dataclasses.asdict(suite_obj),
         "grid": {

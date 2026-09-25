@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import importlib.metadata
 import json
 import math
 import platform
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
@@ -20,6 +21,7 @@ from plateau_rt.application.rf_dataset_manifest import (
     RFDatasetManifest,
     load_rf_dataset_manifest,
 )
+from plateau_rt.domain.rf_tomography import gt as gt_domain
 from plateau_rt.domain.rf_tomography.geometry import CaptureGeometry
 
 RESULT_SCHEMA: str = "rf_tomo_result/3"
@@ -91,6 +93,55 @@ class TomographyDataset:
     tx_pattern: str | None
     target: np.ndarray
     hashes: Mapping[str, str]
+    selection: Mapping[str, Any] = field(default_factory=dict)
+
+
+def select_captures(
+    data: TomographyDataset,
+    *,
+    bs: Sequence[int] | None = None,
+    num_bins: int | None = None,
+) -> TomographyDataset:
+    """Return ``data`` keeping only the BS indices ``bs`` and central ``num_bins``."""
+    if bs is None and num_bins is None:
+        return data
+    if len(data.selection) != 0:
+        raise ValueError("data already carries a selection")
+    num_bs = int(data.geom.num_bs)
+    num_total = int(data.geom.num_bins)
+    bs_idx: list[int] | None = None
+    if bs is not None:
+        bs_idx = gt_domain.bs_indices(bs, num_bs)
+    start = 0
+    stop = num_total
+    if num_bins is not None:
+        if isinstance(num_bins, bool) or not isinstance(num_bins, (int, np.integer)):
+            raise ValueError("num_bins must be an int")
+        count = int(num_bins)
+        if count < 2 or count > num_total:
+            raise ValueError(f"num_bins must satisfy 2 <= num_bins <= {num_total}")
+        start = num_total // 2 - count // 2
+        stop = start + count
+    geom = data.geom if bs_idx is None else data.geom.select(None, bs_idx)
+    if num_bins is not None:
+        geom = dataclasses.replace(
+            geom, freq_offsets=np.asarray(geom.freq_offsets[start:stop], dtype=np.float64)
+        )
+    y_clean = data.y_clean if bs_idx is None else data.y_clean[:, bs_idx]
+    if num_bins is not None:
+        y_clean = y_clean[..., start:stop]
+    y_clean = np.ascontiguousarray(y_clean, dtype=np.complex128)
+    los_visible = np.asarray(
+        data.los_visible if bs_idx is None else data.los_visible[:, bs_idx], dtype=bool
+    )
+    selection: dict[str, Any] = {}
+    if bs_idx is not None:
+        selection["bs"] = list(bs_idx)
+    if num_bins is not None:
+        selection["bins"] = [int(start), int(stop)]
+    return dataclasses.replace(
+        data, y_clean=y_clean, geom=geom, los_visible=los_visible, selection=selection
+    )
 
 
 def sha256_file(path: Path | str) -> str:
@@ -305,6 +356,18 @@ def find_ground_truth(
     if isinstance(entry, Mapping) and isinstance(entry.get("artifact"), str):
         return load_ground_truth(dataset.manifest.root / str(entry["artifact"]))
     return None
+
+
+def select_ground_truth(gt: GroundTruth, bs: Sequence[int]) -> GroundTruth:
+    """Return ``gt`` with its tomography arrays subset to the BS indices ``bs``."""
+    if not any(key in gt.arrays for key in gt_domain.GT_CAPTURE_KEYS):
+        return gt
+    arrays = gt_domain.select_bs(gt.arrays, bs)
+    return dataclasses.replace(
+        gt,
+        arrays=arrays,
+        vs_pos=arrays["vs_pos"] if "vs_pos" in arrays else gt.vs_pos,
+    )
 
 
 def to_jsonable(value: Any) -> Any:

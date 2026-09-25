@@ -12,6 +12,7 @@
 #      LoS/NLoS 割当と幾何 LoS マスク (トレースした LoS パスとの一致)、BS ごとのしきい値 (any)
 #  10. トモグラフィー用データセットプロファイル (#15 T20): rich mock city の ci プロファイル (8 リング視点 x 2 BS, N=128, los=False オラクル) の manifest 検査
 #  11. トモグラフィーGT (T17) と再合成・BSパターン・偏波の検証 (#15 T21): L0f NMSE < 1e-3, 直接波比 0.5 dB 以内
+#  12. トモグラフィー heavy smoke (#15 T22): Step 11 の tomography GT を使い、32 ビンのサブバンドで全構成を実行して §6.7 の判定とレポート (ci-reports/tomography_smoke) を出す
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
@@ -81,5 +82,10 @@ echo "🔁 Step 11: Tomography GT, L0f resynthesis and BS-pattern check (#15 T17
 gpu_run python -m plateau_rt.cli.main rf-tomo-gt "${TOMO}/rf_tomo/ci/refraction"
 gpu_run python scripts/ci/check_tomography_resynthesis.py "${TOMO}/rf_tomo/ci/refraction" \
   --report "${CI_REPORT_DIR}/tomography_resynthesis.json"
+
+echo "🧪 Step 12: Tomography heavy smoke (#15 T22) on the ci profile"
+CI_BLAS_THREADS=2 docker compose --profile ci run --rm ci \
+  python scripts/ci/check_tomography_smoke.py "${TOMO}/rf_tomo/ci/refraction" \
+  --out "${CI_REPORT_DIR}/tomography_smoke" --workers 8 --overwrite
 
 echo "✅ Heavy CI finished"

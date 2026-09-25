@@ -34,6 +34,7 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.application.rf_tomography_benchmark",
     "plateau_rt.application.rf_tomography_gt",
     "plateau_rt.application.rf_tomography_resynthesis",
+    "plateau_rt.application.rf_tomography_smoke",
     "plateau_rt.application.optical_reference",
     "plateau_rt.application.scene_checks",
     "plateau_rt.application.solver_profile_report",

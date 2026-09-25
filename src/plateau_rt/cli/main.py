@@ -1162,6 +1162,16 @@ def run_all(input_file: Path, output_dir: Path, num_rx: int, keep_intermediates:
     show_default=True,
     help="Chains run in parallel processes; 1 keeps runtime_s uncontended.",
 )
+@click.option(
+    "--bs",
+    "bs",
+    type=int,
+    multiple=True,
+    help="BS index to keep (repeatable; default all)",
+)
+@click.option(
+    "--num-bins", type=int, default=None, help="central sub-band width in bins (default all)"
+)
 def rf_tomo_bench(
     dataset: Path,
     suite: str,
@@ -1177,6 +1187,8 @@ def rf_tomo_bench(
     grid_spacing: float | None,
     overwrite: bool,
     workers: int,
+    bs: tuple[int, ...],
+    num_bins: int | None,
 ):
     """Run the RF tomography baseline benchmark (design §6, §8 T16)."""
     from plateau_rt.application.rf_dataset_manifest import ManifestError
@@ -1198,6 +1210,8 @@ def rf_tomo_bench(
             dataset_seed=seed,
             overwrite=overwrite,
             workers=workers,
+            bs=list(bs) or None,
+            num_bins=num_bins,
         )
     except (ValueError, FileExistsError, FileNotFoundError, ManifestError) as exc:
         raise click.ClickException(str(exc)) from exc

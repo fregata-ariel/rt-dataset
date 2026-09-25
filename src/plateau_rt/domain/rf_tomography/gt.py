@@ -45,6 +45,42 @@ DEDUP_DECIMALS = 6
 _LOS, _SPECULAR, _REFRACTION, _DIFFRACTION, _DIFFUSE = 0, 1, 2, 3, 4
 _VS_CANDIDATE_TYPES = (_LOS, _SPECULAR, _REFRACTION)
 
+# GT arrays by the axis a BS subset slices (``select_bs``).
+GT_CAPTURE_KEYS: tuple[str, ...] = (
+    "path_type",
+    "path_power",
+    "path_vs",
+    "beyond_period",
+    "los_visible",
+    "ground_bounce_visible",
+    "los_phase_model_error",
+    "los_amp_model_error_db",
+)
+GT_VS_KEYS: tuple[str, ...] = (
+    "vs_pos",
+    "vs_bs",
+    "vs_order",
+    "vs_num_paths",
+    "vs_objects",
+    "vs_plane_ids",
+    "vs_spread",
+    "vs_visibility",
+    "vs_power",
+    "vs_rho_eff",
+    "vs_theta_inc",
+    "vs_path_type",
+)
+GT_INTERACTION_KEYS: tuple[str, ...] = (
+    "interaction_points",
+    "interaction_view",
+    "interaction_bs",
+    "interaction_path",
+    "interaction_depth",
+    "interaction_type",
+    "interaction_object",
+    "interaction_plane",
+)
+
 
 def _validate_pattern(pattern: str) -> None:
     """Raise ``ValueError`` unless ``pattern`` is a known antenna pattern."""
@@ -1030,3 +1066,64 @@ def surface_ground_truth(
         "surface_specular_support": support,
         "surface_roi": roi_array,
     }
+
+
+def bs_indices(bs: Sequence[int], num_bs: int) -> list[int]:
+    """Validate a BS subset (non-empty, unique ints in ``[0, num_bs)``, kept in order)."""
+    if isinstance(bs, (str, bytes)):
+        raise ValueError("bs must be a non-empty sequence of BS indices")
+    try:
+        values = list(bs)
+    except TypeError as error:
+        raise ValueError("bs must be a non-empty sequence of BS indices") from error
+    if not values or any(
+        isinstance(value, bool) or not isinstance(value, (int, np.integer)) for value in values
+    ):
+        raise ValueError("bs must be a non-empty sequence of integer BS indices")
+    indices = [int(value) for value in values]
+    if any(not 0 <= index < num_bs for index in indices):
+        raise ValueError(f"bs indices {indices} out of range [0, {num_bs})")
+    if len(set(indices)) != len(indices):
+        raise ValueError("bs must hold unique indices")
+    return indices
+
+
+def select_bs(arrays: Mapping[str, np.ndarray], bs: Sequence[int]) -> dict[str, np.ndarray]:
+    """Return a copy of the GT ``arrays`` restricted to the BS indices ``bs`` (in order).
+
+    Capture arrays are sliced on their BS axis, VS and interaction rows of other
+    BSs are dropped, and ``vs_bs``, ``interaction_bs`` and ``path_vs`` are
+    remapped to the new indices (``path_vs`` of a dropped VS becomes -1).
+    """
+    present = [key for key in GT_CAPTURE_KEYS if key in arrays]
+    if not present:
+        raise ValueError("arrays hold no GT capture key with a BS axis")
+    num_bs = int(np.asarray(arrays[present[0]]).shape[1])
+    if any(np.ndim(arrays[key]) < 2 or np.shape(arrays[key])[1] != num_bs for key in present):
+        raise ValueError(f"GT capture arrays must have shape [V, B, ...] with B = {num_bs}")
+    index = np.asarray(bs_indices(bs, num_bs), dtype=np.int64)
+    new_bs = np.full(num_bs, -1, dtype=np.int64)
+    new_bs[index] = np.arange(index.size)
+    out = {key: np.asarray(value) for key, value in arrays.items()}
+    for key in present:
+        out[key] = out[key][:, index]
+    if "bs_ids" in out:
+        out["bs_ids"] = out["bs_ids"][index]
+    if "vs_bs" in out:
+        keep = new_bs[out["vs_bs"].astype(np.int64)] >= 0
+        new_vs = np.full(keep.size, -1, dtype=np.int64)
+        new_vs[keep] = np.arange(int(keep.sum()))
+        for key in GT_VS_KEYS:
+            if key in out:
+                out[key] = out[key][keep]
+        out["vs_bs"] = new_bs[out["vs_bs"].astype(np.int64)]
+        if "path_vs" in out:
+            path_vs = out["path_vs"].astype(np.int64)
+            out["path_vs"] = np.where(path_vs >= 0, new_vs[np.maximum(path_vs, 0)], -1)
+    if "interaction_bs" in out:
+        keep = new_bs[out["interaction_bs"].astype(np.int64)] >= 0
+        for key in GT_INTERACTION_KEYS:
+            if key in out:
+                out[key] = out[key][keep]
+        out["interaction_bs"] = new_bs[out["interaction_bs"].astype(np.int64)]
+    return out
