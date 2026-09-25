@@ -75,12 +75,20 @@ def nuisance_points(geom: CaptureGeometry, b: int, ground_height: float | None =
     return np.stack([geom.bs_pos[b], image], axis=0).astype(np.float64, copy=False)
 
 
-def _residual_stats(Y_c: np.ndarray, model: np.ndarray) -> tuple[float, float]:
-    """Return ``(relative residual, per-sample residual)`` of ``Y_c`` vs ``model``."""
+def _residual_stats(Y_c: np.ndarray, model: np.ndarray) -> float:
+    """Return the relative residual ``||Y_c - model||^2 / ||Y_c||^2``."""
     residual = float(np.sum(np.abs(Y_c - model) ** 2))
     reference = float(np.sum(np.abs(Y_c) ** 2))
-    resid = float("inf") if reference == 0.0 else residual / reference
-    return resid, residual / Y_c.size
+    return float("inf") if reference == 0.0 else residual / reference
+
+
+def _median_noise(residual_power: np.ndarray) -> float:
+    """Robust per-sample noise power: ``max(0, median(residual_power) / ln 2)``.
+
+    For circular complex Gaussian noise of variance ``sigma^2`` each angle-delay
+    cell power is exponential with median ``sigma^2 ln 2``.
+    """
+    return max(0.0, float(np.median(residual_power) / np.log(2.0)))
 
 
 def _fit_complex(
@@ -168,7 +176,10 @@ def _fit_complex(
     if num_atoms > 1:
         summed = summed + a_ground * cols[1]
     model = factor * summed
-    resid, noise = _residual_stats(Y_c, model)
+    resid = _residual_stats(Y_c, model)
+    residual_cfr = (Y_c - model)[None, None]
+    volume = angle_delay_volume(residual_cfr, oversample=(1, POWER_DELAY_OVERSAMPLE))[0, 0]
+    noise = _median_noise(np.abs(volume) ** 2)
     return {
         "g_los": g_los,
         "a_los": complex(a_los),
@@ -236,6 +247,8 @@ def _fit_power(
         a_ground = 0j
     reference = float(np.sum(obs**2))
     resid = float("inf") if reference == 0.0 else float(cost) / reference
+    profiles = design(tau)[:, :num_atoms]
+    noise = _median_noise(flat - profiles @ weights[:num_atoms])
     return {
         "g_los": g_los,
         "a_los": a_los,
@@ -243,7 +256,7 @@ def _fit_power(
         "phi": phi,
         "tau": tau,
         "resid": resid,
-        "noise": float(weights[-1]),
+        "noise": noise,
     }
 
 
@@ -268,8 +281,26 @@ def fit_los_ground(
     unless ``free_los_phase`` (the design C13 negative control, where the phase
     is absorbed into the amplitude); in ``"power"`` mode both amplitudes are
     nonnegative and the phase is not observable (``phi`` is NaN when
-    ``with_gauge``).  Returns the amplitude, gauge, relative residual and
-    per-sample residual described in the task brief.
+    ``with_gauge``).
+
+    Returned keys:
+
+    * ``g_los``: the LoS amplitude ``|a_los|`` (float ``>= 0``);
+    * ``a_los`` / ``a_ground``: the LoS / ground coefficients (complex; real and
+      nonnegative in power mode, ``a_ground = 0`` without a ground atom);
+    * ``phi``: the capture phase in rad, wrapped to ``(-pi, pi]`` (complex mode
+      with a gauge), ``NaN`` in power mode with a gauge, ``0.0`` without one;
+    * ``tau``: the capture delay in s, wrapped to ``[-T/2, T/2)`` (``0.0``
+      without a gauge);
+    * ``resid``: the relative residual of the fit, ``||Y - model||^2 / ||Y||^2``
+      in complex mode and the relative NNLS cost on the ``|c(u, t)|^2`` volume
+      in power mode;
+    * ``noise``: the same quantity in both modes, a robust estimate of the raw
+      per-sample noise variance ``sigma^2`` (units of ``noise_var``): the median
+      of the per-cell residual power of the capture's delay-oversampled
+      angle-delay volume divided by ``ln 2`` (the median of an exponential
+      cell power), clipped at 0. Complex mode uses ``|vol(Y - model)|^2``, power
+      mode ``|vol(Y)|^2`` minus the fitted atom profiles (not the constant).
     """
     if mode not in FIT_MODES:
         raise ValueError(f"mode must be one of {FIT_MODES}, got {mode!r}")

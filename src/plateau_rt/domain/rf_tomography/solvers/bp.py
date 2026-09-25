@@ -16,6 +16,7 @@ node               function
 =================  ==========================================================
 ``I``, ``I_n0``    :func:`intensity_map` (cone BP + log-mean fusion)
 ``ID``             :func:`power_map` (angle-delay BP)
+``ID-o``, ``I-o``  :func:`power_map` (joint GLRT over captures)
 ``D``              :func:`splat_returns` (return-to-point occupancy log-odds)
 ``P``, ``IP``      :func:`envelope_map` / :func:`coherent_map` (DC bin)
 ``DP``, ``IDP``    :func:`envelope_map` / :func:`coherent_map`
@@ -85,6 +86,7 @@ from plateau_rt.domain.rf_tomography.forward_exact import (
 from plateau_rt.domain.rf_tomography.geometry import CaptureGeometry, VoxelGrid
 from plateau_rt.domain.rf_tomography.kernels import (
     _PRODUCT_AXES,
+    PRODUCT_NODES,
     _capture_tau,
     _product_const,
     dirichlet_power,
@@ -97,6 +99,7 @@ from plateau_rt.domain.rf_tomography.observables import DEFAULT_MASK_K, extract
 COHERENT_NODES: tuple[str, ...] = ("P", "DP", "IP", "IDP")
 PER_BIN_NODES: tuple[str, ...] = ("P_W", "IP_W")
 POWER_NODES: tuple[str, ...] = ("I", "I_n0", "ID")
+OMNI_POWER_NODES: tuple[str, ...] = ("ID_omni", "I_omni")
 E1_NODES: tuple[str, ...] = (
     "I",
     "I_n0",
@@ -246,7 +249,7 @@ def power_column_norm(
     ``E_L`` from :func:`_dirichlet_axis_energy`. 0 at singular points.
     """
     _check_space(space)
-    _check_node(node, POWER_NODES, "power_column_norm")
+    _check_node(node, POWER_NODES + OMNI_POWER_NODES, "power_column_norm")
     pts = _prepare_points(points)
     delays = _capture_tau(tau_hat, geom.num_views, geom.num_bs)
     singular = _singular_mask(pts, geom, space)
@@ -308,12 +311,12 @@ def power_map(
     within 0.33 m.
     """
     _check_space(space)
-    _check_node(node, POWER_NODES, "power_map")
+    _check_node(node, POWER_NODES + OMNI_POWER_NODES, "power_map")
     _check_grid(grid)
     _validate_y(Y, geom)
     _check_noise_var(noise_var)
     delays = _capture_tau(tau_hat, geom.num_views, geom.num_bs)
-    data = extract(Y, node).data
+    data = extract(Y, PRODUCT_NODES[node]).data
     if noise_var is not None:
         data = data - noise_floor(node, geom, noise_var)
     centers = grid.centers()

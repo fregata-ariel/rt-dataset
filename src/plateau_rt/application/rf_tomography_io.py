@@ -22,7 +22,7 @@ from plateau_rt.application.rf_dataset_manifest import (
 )
 from plateau_rt.domain.rf_tomography.geometry import CaptureGeometry
 
-RESULT_SCHEMA: str = "rf_tomo_result/1"
+RESULT_SCHEMA: str = "rf_tomo_result/2"
 RUN_MANIFEST_SCHEMA: str = "rf_tomo_run/1"
 RESULTS_FILE: str = "results.jsonl"
 RUN_MANIFEST_FILE: str = "run_manifest.json"
@@ -49,6 +49,8 @@ RESULT_KEYS: tuple[str, ...] = (
     "status",
     "reason",
     "n_iter",
+    "n_forward",
+    "n_adjoint",
     "hyper",
     "n_detections",
     "metrics",
@@ -383,8 +385,14 @@ def validate_result_row(row: Mapping[str, Any]) -> None:
     for key in ("realization", "n_detections"):
         if not _is_int(row[key]) or int(row[key]) < 0:
             raise ValueError(f"{key} must be an int >= 0")
-    if row["n_iter"] is not None and (not _is_int(row["n_iter"])):
-        raise ValueError("n_iter must be an int or None")
+    for key in ("n_iter", "n_forward", "n_adjoint"):
+        value = row[key]
+        if value is not None and (not _is_int(value) or int(value) < 0):
+            raise ValueError(f"{key} must be an int >= 0 or None")
+    if row["stage"] == "E2" and row["status"] == "ok":
+        for key in ("n_iter", "n_forward", "n_adjoint"):
+            if not _is_int(row[key]):
+                raise ValueError(f"{key} must be an int for an ok E2 row")
     if not isinstance(row["lattices"], list) or any(
         not isinstance(item, str) for item in row["lattices"]
     ):

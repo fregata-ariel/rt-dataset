@@ -25,6 +25,12 @@ from plateau_rt.domain.rf_tomography.forward_sep import (
 )
 from plateau_rt.domain.rf_tomography.geometry import VoxelGrid
 from plateau_rt.domain.rf_tomography.metrics import Peaks
+from plateau_rt.domain.rf_tomography.solvers._core import (
+    CallCounter,
+    IterativeResult,
+    mfista,
+    power_iteration,
+)
 
 DEFAULT_ITERATIONS: int = 200
 DEFAULT_POWER_ITERATIONS: int = 30
@@ -37,15 +43,9 @@ Penalty = Callable[[np.ndarray], float]
 
 
 @dataclass(frozen=True)
-class CoherentResult:
+class CoherentResult(IterativeResult):
     """Output of one coherent E2 solve."""
 
-    x: np.ndarray
-    objective: np.ndarray
-    n_iter: int
-    n_forward: int
-    n_adjoint: int
-    converged: bool
     step: float
 
 
@@ -85,18 +85,12 @@ def tikhonov_lsqr(
     values = _check_data(op, y)
     damping = _check_nonneg(damp, "damp")
     linear = op.as_linear_operator()
-    counts = {"fwd": 0, "adj": 0}
-
-    def matvec(vector: np.ndarray) -> np.ndarray:
-        counts["fwd"] += 1
-        return linear.matvec(vector)
-
-    def rmatvec(vector: np.ndarray) -> np.ndarray:
-        counts["adj"] += 1
-        return linear.rmatvec(vector)
-
+    counted = CallCounter(linear.matvec, linear.rmatvec)
     wrapped = LinearOperator(
-        shape=linear.shape, matvec=matvec, rmatvec=rmatvec, dtype=np.complex128
+        shape=linear.shape,
+        matvec=counted.forward,
+        rmatvec=counted.adjoint,
+        dtype=np.complex128,
     )
     out = lsqr(
         wrapped,
@@ -112,19 +106,20 @@ def tikhonov_lsqr(
         x=np.asarray(x, dtype=np.complex128).reshape(op.x_shape),
         objective=objective,
         n_iter=int(itn),
-        n_forward=counts["fwd"],
-        n_adjoint=counts["adj"],
+        n_forward=counted.n_forward,
+        n_adjoint=counted.n_adjoint,
         converged=int(istop) not in LSQR_BAD_STOP,
         step=float("nan"),
     )
 
 
-def _power_iteration(op: SeparableOperator, n_iter: int, seed: int) -> tuple[float, int]:
-    """Estimate ``||A||_2^2`` by power iteration on ``A^H A``.
-
-    Returns ``(rho, n_calls)`` where ``n_calls`` is the number of forward (and
-    adjoint) applications actually performed.
-    """
+def normal_operator_norm(
+    op: SeparableOperator,
+    *,
+    n_iter: int = DEFAULT_POWER_ITERATIONS,
+    seed: int = 0,
+) -> tuple[float, int]:
+    """Return (power-iteration estimate of ||A||_2^2, number of A^H A applications)."""
     if int(n_iter) < 1:
         raise ValueError("n_iter must be >= 1")
     rng = np.random.default_rng(np.random.SeedSequence([int(seed)]))
@@ -133,17 +128,7 @@ def _power_iteration(op: SeparableOperator, n_iter: int, seed: int) -> tuple[flo
     if norm == 0.0:
         return 0.0, 0
     v = v / norm
-    rho = 0.0
-    calls = 0
-    for _ in range(int(n_iter)):
-        w = op.adjoint(op.forward(v))
-        calls += 1
-        rho = float(np.vdot(v, w).real)
-        wnorm = float(np.linalg.norm(w.ravel()))
-        if wnorm == 0.0:
-            break
-        v = w / wnorm
-    return rho, calls
+    return power_iteration(lambda w: op.adjoint(op.forward(w)), v, int(n_iter), estimate="rayleigh")
 
 
 def lipschitz_constant(
@@ -158,7 +143,7 @@ def lipschitz_constant(
         raise ValueError("n_iter must be >= 1")
     if not np.isfinite(float(safety)) or float(safety) < 1.0:
         raise ValueError("safety must be finite and >= 1")
-    rho, _ = _power_iteration(op, int(n_iter), int(seed))
+    rho, _ = normal_operator_norm(op, n_iter=int(n_iter), seed=int(seed))
     if not np.isfinite(rho) or rho <= 0.0:
         raise ValueError("operator is zero")
     return float(safety) * rho
@@ -239,7 +224,7 @@ def _mfista(
     n_forward = 0
     n_adjoint = 0
     if lipschitz is None:
-        rho, calls = _power_iteration(op, int(power_iterations), int(seed))
+        rho, calls = normal_operator_norm(op, n_iter=int(power_iterations), seed=int(seed))
         n_forward += calls
         n_adjoint += calls
         if not np.isfinite(rho) or rho <= 0.0:
@@ -262,37 +247,28 @@ def _mfista(
         n_forward += 1
 
     f = 0.5 * float(np.sum(np.abs(ax - y) ** 2)) + lam * penalty(x)
-    history = [f]
-    w, aw = x, ax
-    theta = 1.0
-    converged = False
-    n_done = 0
-    for k in range(int(n_iter)):
-        grad = op.adjoint(aw - y)
-        n_adjoint += 1
-        z = prox(w - step * grad, step * lam)
-        az = op.forward(z)
-        n_forward += 1
-        fz = 0.5 * float(np.sum(np.abs(az - y) ** 2)) + lam * penalty(z)
-        theta_next = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * theta**2))
-        if fz <= f:
-            x_new, ax_new, f = z, az, fz
-        else:
-            x_new, ax_new = x, ax
-        denom = max(float(np.linalg.norm(z.ravel())), float(np.linalg.norm(w.ravel())))
-        residual = 0.0 if denom == 0.0 else float(np.linalg.norm((z - w).ravel())) / denom
-        w = x_new + (theta / theta_next) * (z - x_new) + ((theta - 1.0) / theta_next) * (x_new - x)
-        aw = (
-            ax_new
-            + (theta / theta_next) * (az - ax_new)
-            + ((theta - 1.0) / theta_next) * (ax_new - ax)
-        )
-        x, ax, theta = x_new, ax_new, theta_next
-        history.append(f)
-        n_done = k + 1
-        if residual <= float(tol):
-            converged = True
-            break
+    counter = CallCounter(op.forward, op.adjoint)
+
+    def prox_grad(w: np.ndarray, aw: np.ndarray) -> np.ndarray:
+        grad = counter.adjoint(aw - y)
+        return prox(w - step * grad, step * lam)
+
+    def objective(z: np.ndarray, az: np.ndarray) -> float:
+        return 0.5 * float(np.sum(np.abs(az - y) ** 2)) + lam * penalty(z)
+
+    x, history, n_done, converged = mfista(
+        x,
+        ax,
+        f,
+        forward=counter.forward,
+        prox_grad=prox_grad,
+        objective=objective,
+        n_iter=int(n_iter),
+        stop="step",
+        tol=float(tol),
+    )
+    n_forward += counter.n_forward
+    n_adjoint += counter.n_adjoint
     return CoherentResult(
         x=np.asarray(x, dtype=np.complex128),
         objective=np.asarray(history, dtype=np.float64),

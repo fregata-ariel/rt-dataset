@@ -545,6 +545,20 @@ def test_dispatch_matches_direct_calls() -> None:
         bp.power_map(y, geom, grid, "bv", "ID", noise_var=nv),
     )
     assert np.array_equal(
+        run_e1(get_config("ID-o-S"), y, geom, grid, "bv", noise_var=nv),
+        bp.power_map(y, geom, grid, "bv", "ID_omni", noise_var=nv),
+    )
+    assert np.array_equal(
+        run_e1(get_config("I-o"), y, geom, grid, "bv", noise_var=nv),
+        bp.power_map(y, geom, grid, "bv", "I_omni", noise_var=nv),
+    )
+    y_n = scene.tracks["ideal-N"]
+    phi, tau = scene.gt["gauges"]["ideal-N"]
+    assert np.array_equal(
+        run_e1(get_config("ID-o-N"), y_n, geom, grid, "bv", gauges=(phi, tau), noise_var=nv),
+        bp.power_map(y_n, geom, grid, "bv", "ID_omni", tau_hat=tau, noise_var=nv),
+    )
+    assert np.array_equal(
         run_e1(get_config("IDP-S"), y, geom, grid, "bv", noise_var=nv),
         bp.envelope_map(y, geom, grid.centers(), "bv", "IDP", noise_var=nv).reshape(grid.shape),
     )
@@ -649,6 +663,43 @@ def test_dispatch_matches_direct_calls() -> None:
         run_e2(get_config("ID-S"), "kl_em", y, geom, points, "bv", n_iter=5)
     with pytest.raises(ValueError):
         run_e2(get_config("ID-S"), "nn_fista_tv", y, geom, points, "bv", noise_var=nv, n_iter=5)
+
+
+def test_e2_output_counts() -> None:
+    scene = _scene()
+    geom, grid, nv = scene.geom, scene.grid, scene.noise_var
+    y = scene.tracks["ideal-S"]
+    support_in = run_e1(get_config("ID-S"), y, geom, grid, "bv", noise_var=nv)
+    _, points, _ = run_support(support_in, grid)
+
+    out = run_e2(get_config("ID-S"), "kl_em", y, geom, points, "bv", noise_var=nv, n_iter=5)
+    assert out.n_iter == 5
+    assert (out.n_forward, out.n_adjoint) == (6, 6)
+    assert out.n_iter == out.results[0].n_iter
+    assert out.n_forward == out.results[0].n_forward
+    assert out.n_adjoint == out.results[0].n_adjoint
+
+    out = run_e2(
+        get_config("IDP-S"), "tikhonov_lsqr", y, geom, points, "bv", noise_var=nv, n_iter=5
+    )
+    result = out.results[0]
+    calls = coherent.normal_operator_norm(SeparableOperator(points, geom, "bv"))[1]
+    assert calls == 30
+    assert out.n_iter == result.n_iter
+    assert out.n_forward == result.n_forward + calls
+    assert out.n_adjoint == result.n_adjoint + calls
+
+    out = run_e2(
+        get_config("IP-S"), "complex_l1_fista", y, geom, points, "bv", noise_var=nv, n_iter=5
+    )
+    result = out.results[0]
+    assert out.n_forward == result.n_forward
+    assert out.n_adjoint == result.n_adjoint + 1
+
+    out = run_e2(get_config("P_W"), "mmv_per_view", y, geom, points, "bv", noise_var=nv, n_iter=5)
+    assert out.n_iter == sum(r.n_iter for r in out.results)
+    assert out.n_forward == sum(r.n_forward for r in out.results)
+    assert out.n_adjoint == sum(r.n_adjoint for r in out.results) + 16
 
 
 def test_no_statistic_outside_the_node() -> None:

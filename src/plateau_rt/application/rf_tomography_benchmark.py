@@ -1086,6 +1086,9 @@ def _emit_row(
     ill_payload: dict[str, Any] | None,
     runtime_s: float,
     recon: str | None,
+    *,
+    n_forward: int | None = None,
+    n_adjoint: int | None = None,
 ) -> None:
     """Assemble, validate and append one result row in ``RESULT_KEYS`` order."""
     row = dict(partial)
@@ -1096,6 +1099,8 @@ def _emit_row(
             "status": status,
             "reason": reason,
             "n_iter": n_iter,
+            "n_forward": n_forward,
+            "n_adjoint": n_adjoint,
             "hyper": dict(hyper),
             "n_detections": int(n_detections),
             "metrics": metrics_payload,
@@ -1128,6 +1133,8 @@ def _planned_row(
             "status": "n/a",
             "reason": str(entry),
             "n_iter": None,
+            "n_forward": None,
+            "n_adjoint": None,
             "hyper": {},
             "n_detections": 0,
             "metrics": None,
@@ -1752,7 +1759,7 @@ def _run_e2_rows(  # noqa: PLR0913
             step.name,
             "ok",
             None,
-            int(suite_obj.e2_iterations),
+            int(solved.n_iter),
             step.defaults(),
             int(detections.shape[0]),
             metrics_payload,
@@ -1760,6 +1767,8 @@ def _run_e2_rows(  # noqa: PLR0913
             ill_payload,
             runtime,
             relpath,
+            n_forward=int(solved.n_forward),
+            n_adjoint=int(solved.n_adjoint),
         )
 
 

@@ -42,6 +42,7 @@ support graph (for the TV term) and a dense grid map. NumPy/SciPy only.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -50,6 +51,13 @@ from scipy.sparse.linalg import LinearOperator
 
 from plateau_rt.domain.rf_tomography.geometry import VoxelGrid
 from plateau_rt.domain.rf_tomography.metrics import nms_peaks
+from plateau_rt.domain.rf_tomography.solvers._core import (
+    CallCounter,
+    IterativeResult,
+    mfista,
+    power_iteration,
+    relative_decrease_stop,
+)
 
 __all__ = [
     "DEFAULT_CAP",
@@ -75,15 +83,13 @@ DEFAULT_REL_THRESHOLD: float = 1e-2
 
 
 @dataclass(frozen=True)
-class PowerSolution:
-    """Result of one E2 power solve."""
+class PowerSolution(IterativeResult):
+    """Result of one E2 power solve (fields of :class:`IterativeResult`).
 
-    x: np.ndarray  # [P] float64, >= 0
-    objective: np.ndarray  # [n_iter + 1] float64, objective[0] is the start point
-    n_iter: int  # iterations performed (== len(objective) - 1)
-    n_forward: int  # number of op.matvec calls made
-    n_adjoint: int  # number of op.rmatvec calls made
-    converged: bool  # stopped early by `tol`, or trivially solved
+    ``x`` is the ``[P]`` float64 power (``>= 0``), ``n_iter == len(objective) - 1``,
+    ``n_forward`` / ``n_adjoint`` count ``op.matvec`` / ``op.rmatvec`` calls and
+    ``converged`` means stopped early by ``tol`` or trivially solved.
+    """
 
 
 # --- validation helpers -------------------------------------------------------
@@ -184,37 +190,21 @@ def _validate_inputs(
     return y_flat, b, x0_flat, _int_at_least(n_iter, "n_iter", 0), _float_at_least(tol, "tol", 0.0)
 
 
-def _relative_stop(objective: list[float], tol: float) -> bool:
-    """Return True when the last relative decrease is in ``[0, tol * |prev|]``."""
-    previous = objective[-2]
-    current = objective[-1]
-    decrease = previous - current
-    return 0.0 <= decrease <= tol * abs(previous)
-
-
-class _Counted:
-    """Wrap ``op`` and count its ``matvec`` / ``rmatvec`` calls (float64 results)."""
-
-    def __init__(self, op: LinearOperator) -> None:
-        self._op = op
-        self.n_forward = 0
-        self.n_adjoint = 0
-
-    def matvec(self, vector: np.ndarray) -> np.ndarray:
-        """Return ``K @ vector`` and count one forward application."""
-        self.n_forward += 1
-        return np.asarray(self._op.matvec(vector), dtype=np.float64)
-
-    def rmatvec(self, vector: np.ndarray) -> np.ndarray:
-        """Return ``K^T @ vector`` and count one adjoint application."""
-        self.n_adjoint += 1
-        return np.asarray(self._op.rmatvec(vector), dtype=np.float64)
+def _counted(
+    op: LinearOperator,
+) -> tuple[CallCounter, Callable[[np.ndarray], np.ndarray], Callable[[np.ndarray], np.ndarray]]:
+    """Return a float64 :class:`CallCounter` and its forward / adjoint bindings."""
+    counter = CallCounter(
+        lambda v: np.asarray(op.matvec(v), dtype=np.float64),
+        lambda v: np.asarray(op.rmatvec(v), dtype=np.float64),
+    )
+    return counter, counter.forward, counter.adjoint
 
 
 def _solution(
     x: np.ndarray,
     objective: list[float] | np.ndarray,
-    counted: _Counted,
+    counted: CallCounter,
     converged: bool,
 ) -> PowerSolution:
     """Package an objective list and the call counts into a :class:`PowerSolution`."""
@@ -447,8 +437,7 @@ def kl_em(
         op, y, background, x0, n_iter, tol, positive_background=True
     )
     rows = op.shape[0]
-    counted = _Counted(op)
-    matvec, rmatvec = counted.matvec, counted.rmatvec
+    counted, matvec, rmatvec = _counted(op)
 
     sens = rmatvec(np.ones(rows, dtype=np.float64))
     active = sens > 0.0
@@ -468,7 +457,7 @@ def kl_em(
         x = update
         mu = matvec(x) + b
         objective.append(kl_objective(y_flat, mu))
-        if tolerance > 0.0 and _relative_stop(objective, tolerance):
+        if tolerance > 0.0 and relative_decrease_stop(objective, tolerance):
             converged = True
             break
     return _solution(x, objective, counted, converged)
@@ -488,8 +477,7 @@ def is_mlem(
         op, y, background, x0, n_iter, tol, positive_background=True
     )
     rows = op.shape[0]
-    counted = _Counted(op)
-    matvec, rmatvec = counted.matvec, counted.rmatvec
+    counted, matvec, rmatvec = _counted(op)
 
     sens = rmatvec(np.ones(rows, dtype=np.float64))
     active = sens > 0.0
@@ -510,7 +498,7 @@ def is_mlem(
         x = np.where(active, x * np.sqrt(np.maximum(factor, 0.0)), 0.0)
         mu = matvec(x) + b
         objective.append(is_objective(y_flat, mu))
-        if tolerance > 0.0 and _relative_stop(objective, tolerance):
+        if tolerance > 0.0 and relative_decrease_stop(objective, tolerance):
             converged = True
             break
     return _solution(x, objective, counted, converged)
@@ -561,8 +549,7 @@ def nn_fista_l1(
     else:
         lipschitz_f = 0.0
 
-    counted = _Counted(op)
-    matvec, rmatvec = counted.matvec, counted.rmatvec
+    counted, matvec, rmatvec = _counted(op)
 
     residual = y_flat - b
     lam_max = float(np.max(rmatvec(residual)))
@@ -571,15 +558,9 @@ def nn_fista_l1(
         return _solution(np.zeros(cols, dtype=np.float64), [start_value], counted, True)
 
     if lipschitz is None:
-        v = np.full(cols, 1.0 / np.sqrt(cols), dtype=np.float64)
-        norm = 0.0
-        for _ in range(power_iters_i):
-            w = rmatvec(matvec(v))
-            norm = float(np.linalg.norm(w))
-            if norm == 0.0:
-                break
-            v = w / norm
-        lipschitz_value = 1.05 * norm
+        v0 = np.full(cols, 1.0 / np.sqrt(cols), dtype=np.float64)
+        lip, _ = power_iteration(lambda v: rmatvec(matvec(v)), v0, power_iters_i, estimate="norm")
+        lipschitz_value = 1.05 * lip
     else:
         lipschitz_value = lipschitz_f
 
@@ -635,31 +616,24 @@ def nn_fista_l1(
     else:
         x = x0_flat
         mapped = matvec(x)
-    objective = [objective_at(mapped, x)]
+    f0 = objective_at(mapped, x)
 
-    yv = x
-    ky = mapped
-    t = 1.0
-    converged = False
-    for _ in range(iterations):
-        gradient = rmatvec(ky - residual)
-        gradient = tv_gradient(yv, gradient)
-        z = np.maximum(yv - (gradient + l1) / lipschitz_total, 0.0)
-        kz = matvec(z)
-        value_z = objective_at(kz, z)
-        t_next = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t * t))
-        x_prev = x
-        kx_prev = mapped
-        accepted = value_z <= objective[-1]
-        if accepted:
-            x, mapped = z, kz
-            objective.append(value_z)
-        else:
-            objective.append(objective[-1])
-        yv = x + (t / t_next) * (z - x) + ((t - 1.0) / t_next) * (x - x_prev)
-        ky = mapped + (t / t_next) * (kz - mapped) + ((t - 1.0) / t_next) * (mapped - kx_prev)
-        t = t_next
-        if accepted and tolerance > 0.0 and _relative_stop(objective, tolerance):
-            converged = True
-            break
-    return _solution(x, objective, counted, converged)
+    def prox_grad(w: np.ndarray, aw: np.ndarray) -> np.ndarray:
+        gradient = tv_gradient(w, rmatvec(aw - residual))
+        return np.maximum(w - (gradient + l1) / lipschitz_total, 0.0)
+
+    def objective(z: np.ndarray, az: np.ndarray) -> float:
+        return objective_at(az, z)
+
+    x, history, _, converged = mfista(
+        x,
+        mapped,
+        f0,
+        forward=matvec,
+        prox_grad=prox_grad,
+        objective=objective,
+        n_iter=iterations,
+        stop="objective",
+        tol=tolerance,
+    )
+    return _solution(x, history, counted, converged)

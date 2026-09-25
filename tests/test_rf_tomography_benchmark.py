@@ -156,6 +156,7 @@ def test_schema(micro_run: dict[str, Any]) -> None:
 def test_every_node_runs(micro_run: dict[str, Any]) -> None:
     """Every config runs without errors and stage coverage matches the registry."""
     run = micro_run["run"]
+    geom = tio.load_dataset(micro_run["root"]).geom
     assert _rows_by(run, status="error") == []
     names = {row["config"] for row in run.rows}
     assert names == set(cfg_mod.CONFIGS)
@@ -178,6 +179,7 @@ def test_every_node_runs(micro_run: dict[str, Any]) -> None:
             )
             assert len(rows) == 1
             assert rows[0]["status"] == "ok", (name, strategy)
+            assert rows[0]["n_forward"] is None and rows[0]["n_adjoint"] is None
         for step in cfg.e2:
             rows = _rows_by(
                 run,
@@ -191,9 +193,25 @@ def test_every_node_runs(micro_run: dict[str, Any]) -> None:
             assert len(rows) == 1
             if "bv" in step.spaces:
                 assert rows[0]["status"] == "ok", (name, step.name)
-                assert rows[0]["n_iter"] == 10
+                row = rows[0]
+                factor = geom.num_bins if step.call == "coherent_per_bin" else 1
+                for key in ("n_iter", "n_forward", "n_adjoint"):
+                    assert isinstance(row[key], int) and not isinstance(row[key], bool), key
+                assert 1 <= row["n_iter"] <= 10 * max(1, factor)
+                assert row["n_forward"] >= row["n_iter"]
+                assert row["n_adjoint"] >= row["n_iter"]
+                if step.call == "power":
+                    assert row["n_iter"] == 10
+                if step.call == "coherent_per_bin" and step.operator["bins"] == "all":
+                    # one solve per bin, each at least one iteration: never the budget of 10
+                    assert row["n_iter"] >= geom.num_bins
             else:
                 assert rows[0]["status"] == "n/a"
+    kl = _rows_by(
+        run, config="ID-S", track="ideal-S", space="bv", strategy="none", stage="E2", solver="kl_em"
+    )
+    assert len(kl) == 1
+    assert (kl[0]["n_iter"], kl[0]["n_forward"], kl[0]["n_adjoint"]) == (10, 11, 11)
     mmv = _rows_by(run, config="DP-S", stage="E2", solver="mmv_constrained")
     assert mmv and all(row["status"] == "n/a" for row in mmv)
     for name, cfg in cfg_mod.CONFIGS.items():

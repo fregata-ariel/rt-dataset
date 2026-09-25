@@ -35,6 +35,8 @@ def _valid_row() -> dict[str, Any]:
         "status": "ok",
         "reason": None,
         "n_iter": None,
+        "n_forward": None,
+        "n_adjoint": None,
         "hyper": {"floor": 0.001},
         "n_detections": 2,
         "metrics": {"num_gt": 2},
@@ -283,6 +285,24 @@ def test_validate_result_row() -> None:
     row["reason"] = "must-be-none"
     with pytest.raises(ValueError):
         tio.validate_result_row(row)
+
+    for value in (1.5, True):
+        row = _valid_row()
+        row["n_forward"] = value
+        with pytest.raises(ValueError):
+            tio.validate_result_row(row)
+
+    e2 = _valid_row()
+    e2["stage"] = "E2"
+    e2["n_iter"] = 4
+    e2["n_forward"] = 5
+    e2["n_adjoint"] = 6
+    tio.validate_result_row(e2)
+    e2["n_forward"] = None
+    with pytest.raises(ValueError):
+        tio.validate_result_row(e2)
+
+    assert tio.RESULT_SCHEMA == "rf_tomo_result/2"
 
 
 def test_result_row_io(tmp_path: Path) -> None:

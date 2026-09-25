@@ -347,6 +347,42 @@ def test_self_calibrate_reference_and_init(l0c_scene) -> None:
         self_calibrate(solve, tracks["ideal-N"], op.with_gauges, ref=(8, 0))
 
 
+def test_fit_los_ground_noise_is_sigma2(los_scene) -> None:
+    geom = ring_geometry(num_views=8, num_bins=16)
+    phantom = l0e_image_method(geom=geom)
+    Y = atom_cfr(phantom.gt.points_pos[:2], phantom.gt.points_rho[:2], geom, "vs")
+    ones = np.ones((geom.num_views, geom.num_bs), dtype=bool)
+    for seed in (0, 1):
+        p_ref, _ = reference_power(Y, ones)
+        tracks, gt = make_tracks(Y, 30.0, p_ref, TrackSeeds(seed), freq_offsets=geom.freq_offsets)
+        sigma2 = gt["sigma2"]
+        for v in range(geom.num_views):
+            data = tracks["ideal-N"][v, 0]
+            complex_noise = fit_los_ground(data, geom, v, 0, mode="complex")["noise"]
+            power_noise = fit_los_ground(data, geom, v, 0, mode="power")["noise"]
+            assert 0.9 <= complex_noise / sigma2 <= 1.1
+            assert 0.75 <= power_noise / sigma2 <= 1.2
+            assert 0.75 <= power_noise / complex_noise <= 1.25
+
+    rng = np.random.default_rng(0)
+    s2 = 3e-3
+    for v in range(geom.num_views):
+        shape = (2, *geom.aperture_shape, geom.num_bins)
+        z = np.sqrt(s2 / 2.0) * (rng.standard_normal(shape) + 1j * rng.standard_normal(shape))
+        for mode in ("complex", "power"):
+            noise = fit_los_ground(z, geom, v, 0, mode=mode)["noise"]
+            assert 0.88 * s2 <= noise <= 1.12 * s2
+
+    geom_w, _, scenes = los_scene
+    scene = scenes[0]
+    sigma2 = scene["gt"]["sigma2"]
+    for v in range(geom_w.num_views):
+        data = scene["tracks"]["ideal-N"][v, 0]
+        for mode in ("complex", "power"):
+            noise = fit_los_ground(data, geom_w, v, 0, mode=mode)["noise"]
+            assert noise / sigma2 <= 2.5
+
+
 def test_input_validation(los_scene) -> None:
     geom, _, scenes = los_scene
     data = scenes[0]["tracks"]["ideal-N"][0, 0]

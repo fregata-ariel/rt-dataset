@@ -285,11 +285,12 @@ def test_per_bin_envelope(node: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("node", ["ID", "I", "I_n0"])
+@pytest.mark.parametrize("node", ["ID", "I", "I_n0", "ID_omni", "I_omni"])
 def test_power_column_norm(node: str) -> None:
     geom, grid, _, _, _ = _scene(0)
     points = grid.centers()[:10]
-    rng = np.random.default_rng(np.random.SeedSequence([0, {"ID": 1, "I": 2, "I_n0": 3}[node]]))
+    seeds = {"ID": 1, "I": 2, "I_n0": 3, "ID_omni": 4, "I_omni": 5}
+    rng = np.random.default_rng(np.random.SeedSequence([0, seeds[node]]))
     tau_hat = rng.normal(0.0, 5e-9, size=(geom.num_views, geom.num_bs))
     got = power_column_norm(geom, points, "bv", node, tau_hat=tau_hat)
 
@@ -340,6 +341,48 @@ def test_map_definitions() -> None:
     )
     got_intensity = intensity_map(y_s, geom, grid, "bv", "I", noise_var=sigma2)
     np.testing.assert_array_equal(got_intensity, expected_intensity)
+
+
+@pytest.mark.parametrize(("node", "name"), [("ID_omni", "ID-o"), ("I_omni", "I-o")])
+def test_omni_power_map_definition(node: str, name: str) -> None:
+    geom, grid, _, tracks, gt = _scene(0)
+    y = tracks["ideal-S"]
+    sigma2 = gt["sigma2"]
+    centers = grid.centers()
+    got = power_map(y, geom, grid, "bv", node, noise_var=sigma2)
+    adjoint = power_backproject_grid(
+        extract(y, name).data - noise_floor(node, geom, sigma2),
+        geom,
+        grid,
+        space="bv",
+        product=node,
+    )
+    norm = power_column_norm(geom, centers, "bv", node)
+    denominator = np.sqrt(np.sum(norm**2, axis=(0, 1))).reshape(grid.shape)
+    expected = adjoint / denominator
+    np.testing.assert_allclose(got, expected, rtol=1e-12)
+
+
+def test_omni_glrt_removes_bias() -> None:
+    geom = _micro_geometry()
+    rng = np.random.default_rng(np.random.SeedSequence([16, 5]))
+    points = CENTER + rng.uniform(-3.0, 3.0, (8, 3)) * np.array([1.0, 1.0, 0.5])
+    for node, name in (("ID_omni", "ID-o"), ("I_omni", "I-o")):
+        errors = []
+        raw_errors = []
+        for point in points:
+            y = atom_cfr(point[None], np.ones(1), geom, "bv")
+            grid = VoxelGrid.from_bounds(np.round(point) - 2.0, np.round(point) + 2.0, 0.25)
+            normalised = power_map(y, geom, grid, "bv", node)
+            best = grid.centers()[int(np.argmax(normalised))]
+            errors.append(float(np.linalg.norm(best - point)))
+            raw = power_backproject_grid(
+                extract(y, name).data, geom, grid, space="bv", product=node
+            )
+            raw_best = grid.centers()[int(np.argmax(raw))]
+            raw_errors.append(float(np.linalg.norm(raw_best - point)))
+        assert max(errors) <= (0.6 if node == "ID_omni" else 0.4)
+        assert max(raw_errors) > 1.0
 
 
 # ---------------------------------------------------------------------------

@@ -20,8 +20,6 @@ call                  exact call
                       and ``fn`` takes it, ``noise_var`` only when ``fn`` takes it
 ``points``            as ``grid`` but with ``grid.centers()``; result reshaped to
                       ``grid.shape``
-``power_grid``        ``fn(extract(Yr, PRODUCT_NODES[product]).data, geom, grid, tau,
-                      ``space=space, **kwargs)`` with ``tau = gauges[1]`` or None
 ``roi``               ``Yd`` de-gauged when gauges are given, else ``Yr``;
                       ``fn(Yd, geom, detections, space, **kwargs, noise_var=noise_var)``
 ``power``             ``op = power_operator(points, geom, space, product, tau=tau)``;
@@ -85,7 +83,6 @@ STAGES: tuple[str, ...] = ("E1", "ROI", "support", "E2")
 CALLS: tuple[str, ...] = (
     "grid",
     "points",
-    "power_grid",
     "roi",
     "support",
     "power",
@@ -421,17 +418,6 @@ def _e1_points_envelope(node: str) -> Step:
     return Step("envelope_map", "E1", "points", _bp.envelope_map, kwargs={"node": node})
 
 
-def _e1_power_grid(product: str) -> Step:
-    """Return the E1 ``power_grid`` back-projection step for ``product``."""
-    return Step(
-        "power_backproject_grid",
-        "E1",
-        "power_grid",
-        _kernels.power_backproject_grid,
-        kwargs={"product": product},
-    )
-
-
 def _roi_step(node: str) -> Step:
     """Return the ROI refinement step for ``node``."""
     return Step("roi_refine", "ROI", "roi", _bp.roi_refine, kwargs={"node": node})
@@ -681,14 +667,14 @@ def _make_configs() -> dict[str, Config]:
     cfgs["IP_W"] = _cfg("IP_W", "IP_W", "IP", "any", "completion", "WB", "Co",
                          _e1_points_envelope("IP_W"), e2=_per_bin_w("IP_W"), planned=(_E3,))
     cfgs["I-o"] = _cfg("I-o", "I-o", "I", "any", "omni", "omni", "Pw",
-                       _e1_power_grid("I_omni"), e2=_power_e2("I_omni"))
+                       _e1_grid_power("I_omni"), e2=_power_e2("I_omni"))
     cfgs["D-o-S"] = _cfg("D-o-S", "D-o", "D", "S", "omni", "omni", "Pw", None, planned=(_E1_OMNI,))
     cfgs["D-o-N"] = _cfg("D-o-N", "D-o", "D", "N", "omni", "omni", "Pw", None, planned=(_E1_OMNI,))
     cfgs["P-o"] = _cfg("P-o", "P-o", "P", "any", "omni", "omni", "Pw", None, planned=(_E1_OMNI,))
     cfgs["ID-o-S"] = _cfg("ID-o-S", "ID-o", "ID", "S", "omni", "omni", "Pw",
-                           _e1_power_grid("ID_omni"), e2=_power_e2("ID_omni"))
+                           _e1_grid_power("ID_omni"), e2=_power_e2("ID_omni"))
     cfgs["ID-o-N"] = _cfg("ID-o-N", "ID-o", "ID", "N", "omni", "omni", "Pw",
-                           _e1_power_grid("ID_omni"), e2=_power_e2("ID_omni"),
+                           _e1_grid_power("ID_omni"), e2=_power_e2("ID_omni"),
                            strategies=(XCORR,))
     cfgs["IP-o"] = _cfg(
         "IP-o", "IP-o", "IP", "any", "omni", "omni", "Pw", None, planned=(_E1_OMNI,)
@@ -844,10 +830,6 @@ def run_e1(
         else:
             out = step.fn(yr, geom, grid.centers(), space, **params)
         return np.asarray(out, dtype=np.float64).reshape(grid.shape)
-    if step.call == "power_grid":
-        data = extract(yr, _kernels.PRODUCT_NODES[step.kwargs["product"]]).data
-        out = step.fn(data, geom, grid, tau, space=space, **dict(step.kwargs))
-        return np.asarray(out, dtype=np.float64).reshape(grid.shape)
     raise ValueError(f"unknown E1 call {step.call!r}")
 
 
@@ -887,31 +869,48 @@ def run_support(density: np.ndarray, grid: VoxelGrid) -> tuple[np.ndarray, np.nd
 
 @dataclass(frozen=True)
 class E2Output:
-    """Output of one E2 solve: the nonnegative density and the raw result(s)."""
+    """Output of one E2 solve: the density, the raw result(s) and the cost counts."""
 
     density: np.ndarray
     results: tuple[Any, ...]
+    n_iter: int
+    n_forward: int
+    n_adjoint: int
 
 
 def _resolve_relative(
     step: Step, values: dict[str, float], op: SeparableOperator, y: np.ndarray
-) -> dict[str, float]:
-    """Return ``values`` with relative scales resolved against ``op`` and ``y``."""
+) -> tuple[dict[str, float], int, int]:
+    """Resolve relative scales and return ``(values, extra_forward, extra_adjoint)``.
+
+    The extra counts are the operator applications spent resolving the relative
+    hyperparameters for one solver call (power iteration, or the adjoint of a
+    ``lambda_max`` scale).
+    """
     scales = {h.name: h.relative_to for h in step.hyper}
     absolute = dict(values)
+    extra_forward = 0
+    extra_adjoint = 0
     for key, scale in scales.items():
         if scale is None:
             continue
         if scale == "sigma_max":
-            factor = float(np.sqrt(_coherent.lipschitz_constant(op, safety=1.0)))
+            rho, calls = _coherent.normal_operator_norm(op)
+            if not np.isfinite(rho) or rho <= 0.0:
+                raise ValueError("operator is zero")
+            factor = float(np.sqrt(rho))
+            extra_forward += calls
+            extra_adjoint += calls
         elif scale == "lambda_max":
             factor = float(_coherent.lambda_max(op, y, group=True))
+            extra_adjoint += 1
         elif scale == "lambda_max_l1":
             factor = float(_coherent.lambda_max(op, y, group=False))
+            extra_adjoint += 1
         else:  # pragma: no cover - validated by HyperRange
             raise ValueError(f"unknown relative scale {scale!r}")
         absolute[key] = float(values[key]) * factor
-    return absolute
+    return absolute, extra_forward, extra_adjoint
 
 
 def _selected_bins(step: Step, yr: np.ndarray) -> tuple[int, ...] | None:
@@ -932,13 +931,13 @@ def _solve_coherent_bin(
     y: np.ndarray,
     values: dict[str, float],
     n_iter: int,
-) -> Any:
-    """Run one coherent solver call with resolved relative values."""
-    absolute = _resolve_relative(step, values, op, y)
+) -> tuple[Any, int, int]:
+    """Run one coherent solver call; return ``(result, extra_forward, extra_adjoint)``."""
+    absolute, extra_forward, extra_adjoint = _resolve_relative(step, values, op, y)
     call_kwargs = dict(step.kwargs)
     call_kwargs.update(absolute)
     call_kwargs.update(_iteration_kwarg(step.fn, n_iter))
-    return step.fn(op, y, **call_kwargs)
+    return step.fn(op, y, **call_kwargs), extra_forward, extra_adjoint
 
 
 def run_e2(
@@ -982,7 +981,13 @@ def run_e2(
         call_kwargs.update(_iteration_kwarg(step.fn, budget))
         result = step.fn(op, y, background, **call_kwargs)
         density = np.asarray(result.x, dtype=np.float64).reshape(-1)
-        return E2Output(density=density, results=(result,))
+        return E2Output(
+            density=density,
+            results=(result,),
+            n_iter=int(result.n_iter),
+            n_forward=int(result.n_forward),
+            n_adjoint=int(result.n_adjoint),
+        )
     if step.call == "coherent":
         data_node = step.operator["data_node"]
         beta_model = step.operator["beta_model"]
@@ -990,11 +995,17 @@ def run_e2(
         data = _bp.node_data(yr, data_node, noise_var=noise_var)
         y = data if bins is None else data[..., list(bins)]
         op = SeparableOperator(pts, geom, space, beta_model=beta_model, gauges=gauges, bins=bins)
-        result = _solve_coherent_bin(step, op, y, values, budget)
+        result, extra_forward, extra_adjoint = _solve_coherent_bin(step, op, y, values, budget)
         density = np.asarray(
             _coherent.point_density(result.x, beta_model), dtype=np.float64
         ).reshape(-1)
-        return E2Output(density=density, results=(result,))
+        return E2Output(
+            density=density,
+            results=(result,),
+            n_iter=int(result.n_iter),
+            n_forward=int(result.n_forward) + extra_forward,
+            n_adjoint=int(result.n_adjoint) + extra_adjoint,
+        )
     if step.call == "coherent_per_bin":
         data_node = step.operator["data_node"]
         beta_model = step.operator["beta_model"]
@@ -1006,16 +1017,30 @@ def run_e2(
             bin_list = list(selected)
         densities: list[np.ndarray] = []
         results: list[Any] = []
+        n_iter = 0
+        n_forward = 0
+        n_adjoint = 0
         for single in bin_list:
             y_bin = data[..., [single]]
             op_bin = SeparableOperator(
                 pts, geom, space, beta_model=beta_model, gauges=gauges, bins=(single,)
             )
-            res = _solve_coherent_bin(step, op_bin, y_bin, values, budget)
+            res, extra_forward, extra_adjoint = _solve_coherent_bin(
+                step, op_bin, y_bin, values, budget
+            )
             results.append(res)
+            n_iter += int(res.n_iter)
+            n_forward += int(res.n_forward) + extra_forward
+            n_adjoint += int(res.n_adjoint) + extra_adjoint
             densities.append(
                 np.asarray(_coherent.point_density(res.x, beta_model), dtype=np.float64).reshape(-1)
             )
         density = np.asarray(np.mean(densities, axis=0), dtype=np.float64).reshape(-1)
-        return E2Output(density=density, results=tuple(results))
+        return E2Output(
+            density=density,
+            results=tuple(results),
+            n_iter=n_iter,
+            n_forward=n_forward,
+            n_adjoint=n_adjoint,
+        )
     raise ValueError(f"unknown E2 call {step.call!r}")
