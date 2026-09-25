@@ -61,6 +61,10 @@ services:
       PYTHONPATH: /workspace/src
       PYTHONDONTWRITEBYTECODE: "1"
       MPLBACKEND: Agg
+      # BLAS のスレッド数を固定する。共有ランナーの高負荷時に過剰なスレッドで単体テストが 10 倍以上遅くなるため
+      OMP_NUM_THREADS: ${CI_BLAS_THREADS:-4}
+      OPENBLAS_NUM_THREADS: ${CI_BLAS_THREADS:-4}
+      MKL_NUM_THREADS: ${CI_BLAS_THREADS:-4}
     command: python -m pytest -p no:cacheprovider -v tests
 
   # GPU 付き CI ランナー (節目に回す重い E2E 検証用)
