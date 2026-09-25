@@ -231,6 +231,11 @@ class SeparableOperator:
         return self._x_shape
 
     @property
+    def beta_model(self) -> str:
+        """Amplitude model: ``"shared"``, ``"per_view"`` or ``"constrained"``."""
+        return self._beta_model
+
+    @property
     def y_shape(self) -> tuple[int, ...]:
         """Shape of the CFR ``Y``."""
         return self._y_shape
