@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -447,3 +448,7 @@ def test_workers_match_sequential(micro_run: dict[str, Any], tmp_path: Path) -> 
     assert any(row["strategy"] == "los" for row in serial.rows)
     with pytest.raises(ValueError):
         bench.run_benchmark(root, tmp_path / "bad", "unit", workers=0, **kwargs)
+    iso = dataclasses.replace(tio.load_dataset(root), tx_pattern="iso")
+    with pytest.raises(ValueError, match="tx_pattern"):
+        bench.run_benchmark(iso, tmp_path / "iso", "unit", **kwargs)
+    assert not (tmp_path / "iso").exists()

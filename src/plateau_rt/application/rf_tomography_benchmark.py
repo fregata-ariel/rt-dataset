@@ -64,6 +64,9 @@ NMS_RADIUS_CELLS: float = 1.5
 PEAK_REL_THRESHOLD: float = 0.05
 RHO_MIN: float = 10.0
 XCORR_ALTERNATIONS: int = 2
+# The operators, E1 maps and gauge fits use their default BS pattern (TR 38.901, scalar
+# polarisation); a dataset traced with another transmit pattern would be silently mismatched.
+SUPPORTED_TX_PATTERNS: tuple[str, ...] = ("tr38901",)
 LIST_COMPONENTS: dict[str, tuple[str, ...]] = {
     "D": ("u_y", "u_z", "t"),
     "ID": ("u_y", "u_z", "t"),
@@ -809,6 +812,11 @@ def run_benchmark(
     space_list = _resolve_spaces(spaces, suite_obj)
     strategy_filter = None if strategies is None else list(strategies)
     data = dataset if isinstance(dataset, tio.TomographyDataset) else tio.load_dataset(dataset)
+    if data.tx_pattern is not None and data.tx_pattern not in SUPPORTED_TX_PATTERNS:
+        raise ValueError(
+            f"dataset tx_pattern {data.tx_pattern!r} is not modelled; the tomography operators "
+            f"assume one of {SUPPORTED_TX_PATTERNS}"
+        )
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     results_path = out / tio.RESULTS_FILE
