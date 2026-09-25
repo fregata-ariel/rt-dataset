@@ -2,7 +2,8 @@
 
 For every registered configuration the runner executes the T15 chain through the
 executors, estimates N-mode gauges with the registered strategies, computes
-``ill_posed`` with T15b at the estimate and scores detections with T10.
+``ill_posed`` with T15b at the estimate and scores detections with T10, plus
+surface/plane metrics and stratification (design §6.4 M1-M3, M6).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from typing import Any, TextIO
 import numpy as np
 from scipy.optimize import minimize
 
+from plateau_rt.application import rf_tomography_gt as gt_app
 from plateau_rt.application import rf_tomography_io as tio
 from plateau_rt.domain.rf_tomography import kernels as kernel_mod
 from plateau_rt.domain.rf_tomography import metrics as metric_mod
@@ -355,6 +357,9 @@ def gauge_error_summary(
     truth: tuple[np.ndarray, np.ndarray],
     period: float,
     estimates: Sequence[str],
+    *,
+    los_visible: np.ndarray | None = None,
+    los_model_error: np.ndarray | None = None,
 ) -> dict[str, Any]:
     """Summarize wrapped gauge errors of ``used`` against ``truth``."""
     errors = metric_mod.gauge_errors(used, truth, period=float(period))
@@ -367,6 +372,41 @@ def gauge_error_summary(
         delay = np.abs(np.asarray(errors.delay, dtype=np.float64))
         summary["delay_rms_ns"] = float(1e9 * np.sqrt(np.mean(delay**2)))
         summary["delay_max_ns"] = float(1e9 * np.max(delay))
+    if los_visible is not None:
+        try:
+            mask = np.asarray(los_visible, dtype=bool)
+        except (TypeError, ValueError) as error:
+            raise ValueError("los_visible must have the gauge [V, B] shape") from error
+        if mask.shape != np.asarray(errors.phase).shape:
+            raise ValueError("los_visible must have the gauge [V, B] shape")
+        by_los: dict[str, Any] = {}
+        for key, selected in zip(gt_app.LOS_STRATA, (mask, ~mask), strict=True):
+            count = int(np.count_nonzero(selected))
+            entry: dict[str, Any] = {"num": count}
+            if "phi" in cfg.gauge_unknowns:
+                picked = np.abs(np.asarray(errors.phase, dtype=np.float64)[selected])
+                entry["phase_rms_deg"] = (
+                    float(np.rad2deg(np.sqrt(np.mean(picked**2)))) if count else None
+                )
+                entry["phase_max_deg"] = float(np.rad2deg(np.max(picked))) if count else None
+            if "tau" in cfg.gauge_unknowns:
+                picked = np.abs(np.asarray(errors.delay, dtype=np.float64)[selected])
+                entry["delay_rms_ns"] = float(1e9 * np.sqrt(np.mean(picked**2))) if count else None
+                entry["delay_max_ns"] = float(1e9 * np.max(picked)) if count else None
+            by_los[key] = entry
+        if los_model_error is not None:
+            try:
+                model_err = np.asarray(los_model_error, dtype=np.float64)
+            except (TypeError, ValueError) as error:
+                raise ValueError("los_model_error must have the gauge [V, B] shape") from error
+            if model_err.shape != np.asarray(errors.phase).shape:
+                raise ValueError("los_model_error must have the gauge [V, B] shape")
+            visible_err = np.abs(np.degrees(model_err[mask]))
+            visible_err = visible_err[np.isfinite(visible_err)]
+            by_los["los_visible"]["los_model_error_deg_max"] = (
+                float(np.max(visible_err)) if visible_err.size else None
+            )
+        summary["by_los"] = by_los
     return summary
 
 
@@ -1054,6 +1094,26 @@ def _base_row(
     }
 
 
+def _tomography_vs(ground_truth: tio.GroundTruth | None) -> bool:
+    """Return True when ``ground_truth`` holds tomography VS arrays (not points GT)."""
+    if ground_truth is None:
+        return False
+    required = (
+        "vs_pos",
+        "vs_bs",
+        "vs_order",
+        "vs_visibility",
+        "vs_power",
+        "vs_path_type",
+        "path_power",
+        "path_type",
+        "los_visible",
+    )
+    if any(key not in ground_truth.arrays for key in required):
+        return False
+    return not (ground_truth.points_pos is not None and ground_truth.points_space == "vs")
+
+
 def _metrics_for(
     detections: np.ndarray,
     scores: np.ndarray,
@@ -1061,14 +1121,38 @@ def _metrics_for(
     space: str,
     grid: VoxelGrid,
     geom: CaptureGeometry,
+    *,
+    density: np.ndarray | None = None,
 ) -> dict[str, Any] | None:
     """Return detection metrics of one ok row (None without GT in ``space``)."""
     if ground_truth is None:
         return None
+    if space == "vs" and _tomography_vs(ground_truth):
+        arrays = ground_truth.arrays
+        detectable = gt_app.vs_detectable(arrays)
+        payload = detection_metrics(
+            detections,
+            scores,
+            np.asarray(arrays["vs_pos"])[detectable],
+            grid,
+            geom.ue_pos.mean(axis=0),
+        )
+        payload["gt_subset"] = "vs_detectable"
+        payload["num_gt_total"] = int(np.asarray(arrays["vs_pos"]).shape[0])
+        payload["vs_dynamic_range_db"] = float(gt_app.VS_DYNAMIC_RANGE_DB)
+        payload["strata"] = gt_app.vs_recall_strata(
+            detections, arrays, detectable=detectable, gates=GATES_M
+        )
+        return payload
+    payload = None
     gt_points = ground_truth.positions(space)
-    if gt_points is None:
-        return None
-    return detection_metrics(detections, scores, gt_points, grid, geom.ue_pos.mean(axis=0))
+    if gt_points is not None:
+        payload = detection_metrics(detections, scores, gt_points, grid, geom.ue_pos.mean(axis=0))
+    if space == "bv" and density is not None and "surface_samples" in ground_truth.arrays:
+        if payload is None:
+            payload = {}
+        payload["surface"] = gt_app.score_surface_map(ground_truth.arrays, density, grid)
+    return payload
 
 
 def _emit_row(
@@ -1214,7 +1298,18 @@ def _run_chain(  # noqa: PLR0913
     gauge_runtime = time.perf_counter() - gauge_start
     gauge_payload: dict[str, Any] | None = None
     if cfg.gauge_unknowns:
-        gauge_payload = gauge_error_summary(cfg, gauges_used or zeros, truth, period, estimates)
+        model_error = (
+            ground_truth.arrays.get("los_phase_model_error") if ground_truth is not None else None
+        )
+        gauge_payload = gauge_error_summary(
+            cfg,
+            gauges_used or zeros,
+            truth,
+            period,
+            estimates,
+            los_visible=data.los_visible,
+            los_model_error=model_error,
+        )
         gauge_payload["runtime_s"] = gauge_runtime
     if cfg.e1 is None:
         reason = "; ".join(cfg.planned) if cfg.planned else "no E1 step"
@@ -1292,7 +1387,9 @@ def _run_chain(  # noqa: PLR0913
         ill_payload["runtime_s"] = time.perf_counter() - ill_start
     except Exception as error:  # noqa: BLE001
         ill_payload = {"error": f"{type(error).__name__}: {error}"}
-    metrics_payload = _metrics_for(detections, scores, ground_truth, space, grid, geom)
+    metrics_payload = _metrics_for(
+        detections, scores, ground_truth, space, grid, geom, density=estimate
+    )
     recon_arrays: dict[str, Any] = {
         "map": np.asarray(estimate, dtype=np.float64),
         "detections": detections,
@@ -1739,7 +1836,9 @@ def _run_e2_rows(  # noqa: PLR0913
             )
             continue
         runtime = time.perf_counter() - started
-        metrics_payload = _metrics_for(detections, scores, ground_truth, space, grid, geom)
+        metrics_payload = _metrics_for(
+            detections, scores, ground_truth, space, grid, geom, density=density_map
+        )
         recon_arrays: dict[str, Any] = {
             "map": np.asarray(density_map, dtype=np.float64),
             "density": np.asarray(solved.density, dtype=np.float64),
@@ -1809,6 +1908,17 @@ def _run_manifest(  # noqa: PLR0913
             if ground_truth.points_pos is None
             else int(ground_truth.points_pos.shape[0]),
             "num_vs": 0 if ground_truth.vs_pos is None else int(ground_truth.vs_pos.shape[0]),
+            "num_vs_detectable": (
+                int(gt_app.vs_detectable(ground_truth.arrays).sum())
+                if _tomography_vs(ground_truth)
+                else None
+            ),
+            "vs_dynamic_range_db": float(gt_app.VS_DYNAMIC_RANGE_DB),
+            "num_surface_samples": (
+                int(np.asarray(ground_truth.arrays["surface_samples"]).shape[0])
+                if "surface_samples" in ground_truth.arrays
+                else 0
+            ),
         }
     payload = {
         "schema": tio.RUN_MANIFEST_SCHEMA,

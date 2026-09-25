@@ -22,20 +22,38 @@ from plateau_rt.application.rf_dataset_manifest import (
     RFDatasetManifest,
     load_rf_dataset_manifest,
 )
-from plateau_rt.domain.rf_tomography import gt
+from plateau_rt.domain.rf_tomography import gt, metrics
 from plateau_rt.domain.rf_tomography.antenna import PATTERN_KINDS
-from plateau_rt.domain.rf_tomography.geometry import CaptureGeometry
+from plateau_rt.domain.rf_tomography.geometry import CaptureGeometry, VoxelGrid
 
 __all__ = [
+    "DETECTION_GATES_M",
+    "LOS_STRATA",
+    "SURFACE_STRATA",
+    "VS_DYNAMIC_RANGE_DB",
+    "VS_STRATA_KINDS",
     "SceneMesh",
     "build_tomography_gt",
     "default_surface_roi",
     "load_path_gt",
     "load_scene_mesh",
+    "load_tomography_gt",
     "resolve_scene_xml",
+    "score_planes",
+    "score_surface_map",
     "summarize_tomography_gt",
+    "vs_detectable",
+    "vs_recall_strata",
+    "vs_strata",
     "write_tomography_gt",
 ]
+
+
+VS_DYNAMIC_RANGE_DB: float = 30.0
+DETECTION_GATES_M: tuple[float, ...] = (0.5, 1.0, 2.0, 4.0)
+SURFACE_STRATA: tuple[str, ...] = ("all", "observable", "specular")
+LOS_STRATA: tuple[str, ...] = ("los_visible", "los_blocked")
+VS_STRATA_KINDS: tuple[str, ...] = ("mechanism", "order", "los")
 
 
 @dataclass(frozen=True)
@@ -320,4 +338,320 @@ def summarize_tomography_gt(gt_arrays: Mapping[str, np.ndarray]) -> dict[str, An
         summary["num_surface_specular_support"] = int(
             np.count_nonzero(np.asarray(gt_arrays["surface_specular_support"]))
         )
+    vs_keys = ("path_power", "path_type", "vs_power", "vs_visibility", "vs_bs")
+    if all(key in gt_arrays for key in vs_keys):
+        summary["num_vs_detectable"] = int(np.count_nonzero(vs_detectable(gt_arrays)))
+        if all(key in gt_arrays for key in ("vs_path_type", "los_visible")):
+            mechanism = vs_strata(gt_arrays)["mechanism"]
+            summary["vs_per_mechanism"] = {
+                str(label): int(np.count_nonzero(mechanism == label))
+                for label in sorted(set(mechanism.tolist()))
+            }
     return summary
+
+
+def load_tomography_gt(path: Path | str) -> dict[str, np.ndarray]:
+    """Load a ``tomography_gt.npz`` file into a plain array dict."""
+    location = Path(path)
+    try:
+        with np.load(location, allow_pickle=False) as payload:
+            arrays = {name: np.asarray(payload[name]) for name in payload.files}
+    except OSError as error:
+        raise ValueError(f"tomography GT could not be loaded from {location}: {error}") from error
+    if "schema" not in arrays or str(arrays["schema"]) != gt.GT_SCHEMA:
+        raise ValueError(f"{location} has no valid tomography GT schema {gt.GT_SCHEMA!r}")
+    return arrays
+
+
+def _vs_shapes(
+    gt_arrays: Mapping[str, np.ndarray],
+) -> tuple[int, int, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return ``(V, B, M, path_type, path_power, vs_power, vs_visibility, vs_bs)``."""
+    try:
+        path_type = np.asarray(gt_arrays["path_type"])
+        path_power = np.asarray(gt_arrays["path_power"], dtype=np.float64)
+        vs_power = np.asarray(gt_arrays["vs_power"], dtype=np.float64)
+        vs_visibility = np.asarray(gt_arrays["vs_visibility"], dtype=bool)
+        vs_bs = np.asarray(gt_arrays["vs_bs"]).reshape(-1)
+    except (TypeError, ValueError) as error:
+        raise ValueError("tomography GT VS arrays have invalid dtypes") from error
+    if path_type.ndim != 3 or path_power.shape != path_type.shape:
+        raise ValueError("path_type and path_power must share a [V, B, P] shape")
+    num_views, num_bs = path_type.shape[0], path_type.shape[1]
+    num_vs = int(vs_bs.shape[0])
+    if vs_power.shape != (num_vs, num_views) or vs_visibility.shape != (num_vs, num_views):
+        raise ValueError("vs_power and vs_visibility must have shape [M, V]")
+    if num_vs > 0 and (
+        not np.all(np.isfinite(vs_power))
+        or np.any(vs_power < 0.0)
+        or np.any(vs_bs < 0)
+        or np.any(vs_bs >= num_bs)
+    ):
+        raise ValueError("vs_power must be finite and >= 0 with vs_bs in [0, B)")
+    return num_views, num_bs, num_vs, path_type, path_power, vs_power, vs_visibility, vs_bs
+
+
+def vs_detectable(
+    gt_arrays: Mapping[str, np.ndarray],
+    dynamic_range_db: float = VS_DYNAMIC_RANGE_DB,
+    captures: np.ndarray | None = None,
+) -> np.ndarray:
+    """Flag virtual sources within the dynamic range of their capture's peak."""
+    num_views, num_bs, num_vs, path_type, path_power, vs_power, vs_visibility, vs_bs = _vs_shapes(
+        gt_arrays
+    )
+    if num_vs == 0:
+        return np.zeros((0,), dtype=bool)
+    if captures is None:
+        keep = np.ones((num_views, num_bs), dtype=bool)
+    else:
+        try:
+            keep = np.asarray(captures, dtype=bool)
+        except (TypeError, ValueError) as error:
+            raise ValueError("captures must have shape [V, B]") from error
+        if keep.shape != (num_views, num_bs):
+            raise ValueError(f"captures must have shape [{num_views}, {num_bs}], got {keep.shape}")
+    table = np.zeros((num_vs, num_views * num_bs), dtype=np.float64)
+    view_index = np.arange(num_views)
+    table[np.arange(num_vs)[:, None], view_index[None, :] * num_bs + vs_bs[:, None]] = np.where(
+        vs_visibility, vs_power, 0.0
+    )
+    masked = np.where(path_type >= 0, path_power, -np.inf)
+    best = np.max(masked, axis=-1)
+    reference = np.where(np.isfinite(best), best, 0.0).reshape(-1)
+    flat_keep = keep.reshape(-1).astype(np.float64)
+    table = table * flat_keep[None, :]
+    reference = reference * flat_keep
+    return metrics.detectable_mask(table, dynamic_range_db, reference=reference)
+
+
+def vs_strata(gt_arrays: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Label every virtual source by mechanism, order and LoS visibility."""
+    num_views, _, num_vs, _, _, vs_power, vs_visibility, vs_bs = _vs_shapes(gt_arrays)
+    try:
+        vs_path_type = np.asarray(gt_arrays["vs_path_type"]).reshape(num_vs, num_views)
+        vs_order = np.asarray(gt_arrays["vs_order"]).reshape(num_vs)
+        los_visible = np.asarray(gt_arrays["los_visible"], dtype=bool)
+    except (TypeError, ValueError) as error:
+        raise ValueError("tomography GT VS label arrays have invalid shapes") from error
+    if los_visible.ndim != 2 or los_visible.shape[0] != num_views:
+        raise ValueError(f"los_visible must have shape [{num_views}, B]")
+    if num_vs > 0 and np.any(vs_bs >= los_visible.shape[1]):
+        raise ValueError("vs_bs must index los_visible columns")
+    mechanism: list[str] = []
+    for m in range(num_vs):
+        seen = np.flatnonzero(vs_visibility[m])
+        if seen.shape[0] == 0:
+            mechanism.append("none")
+            continue
+        ranked = seen[np.argmax(vs_power[m, seen])]
+        kind = int(vs_path_type[m, int(ranked)])
+        mechanism.append(gt.PATH_TYPE_NAMES[kind] if kind >= 0 else "none")
+    order: list[str] = []
+    for value in vs_order.tolist():
+        rank = int(value)
+        if rank < 0:
+            raise ValueError("vs_order must be >= 0")
+        order.append(str(rank) if rank <= 2 else "3+")
+    los: list[str] = []
+    for m in range(num_vs):
+        base = int(vs_bs[m])
+        visible = bool(np.any(vs_visibility[m] & los_visible[:, base]))
+        los.append("los_visible" if visible else "los_blocked")
+    return {
+        "mechanism": np.asarray(mechanism),
+        "order": np.asarray(order),
+        "los": np.asarray(los),
+    }
+
+
+def vs_recall_strata(
+    detections: np.ndarray,
+    gt_arrays: Mapping[str, np.ndarray],
+    *,
+    detectable: np.ndarray | None = None,
+    gates: Sequence[float] = DETECTION_GATES_M,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Stratified VS recall of ``detections`` at every gate."""
+    try:
+        det = np.asarray(detections, dtype=np.float64).reshape(-1, 3)
+    except (TypeError, ValueError) as error:
+        raise ValueError("detections must have shape [N, 3]") from error
+    gate_list = [float(gate) for gate in gates]
+    for gate in gate_list:
+        if not np.isfinite(gate) or gate <= 0.0:
+            raise ValueError("gates must be finite and > 0")
+    positions = np.asarray(gt_arrays["vs_pos"], dtype=np.float64).reshape(-1, 3)
+    num_vs = int(positions.shape[0])
+    if detectable is None:
+        selected = vs_detectable(gt_arrays)
+    else:
+        try:
+            selected = np.asarray(detectable, dtype=bool)
+        except (TypeError, ValueError) as error:
+            raise ValueError("detectable must have shape [M]") from error
+        if selected.shape != (num_vs,):
+            raise ValueError(f"detectable must have shape [{num_vs}], got {selected.shape}")
+    strata = vs_strata(gt_arrays)
+    gt_points = positions[selected]
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for kind in VS_STRATA_KINDS:
+        scoped = strata[kind][selected]
+        per_gate = [
+            metrics.stratified_recall(metrics.match(det, gt_points, gate), scoped)
+            for gate in gate_list
+        ]
+        per_label: dict[str, dict[str, Any]] = {}
+        for label in sorted(set(scoped.tolist())):
+            per_label[label] = {
+                "num_gt": int(per_gate[0][label]["num_gt"]) if per_gate else 0,
+                "recall": {
+                    f"{gate}": float(per_gate[i][label]["recall"])
+                    for i, gate in enumerate(gate_list)
+                },
+            }
+        out[kind] = per_label
+    return out
+
+
+def score_surface_map(
+    gt_arrays: Mapping[str, np.ndarray],
+    density: np.ndarray,
+    grid: VoxelGrid,
+    *,
+    rel_threshold: float = metrics.MAP_REL_THRESHOLD,
+    thresholds: Sequence[float] = metrics.SURFACE_THRESHOLDS_M,
+) -> dict[str, Any]:
+    """Score a BV-space map against the mesh surface samples per stratum."""
+    for key in ("surface_samples", "surface_observable", "surface_specular_support"):
+        if key not in gt_arrays:
+            raise KeyError(f"gt_arrays is missing {key!r}")
+    try:
+        samples = np.asarray(gt_arrays["surface_samples"], dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise ValueError("surface_samples must be a real [S, 3] array") from error
+    if samples.size == 0:
+        samples = np.zeros((0, 3), dtype=np.float64)
+    if samples.ndim != 2 or samples.shape[1] != 3:
+        raise ValueError("surface_samples must have shape [S, 3]")
+    if samples.shape[0] > 0 and not np.all(np.isfinite(samples)):
+        raise ValueError("surface_samples must contain only finite values")
+    count = samples.shape[0]
+    masks: dict[str, np.ndarray] = {"all": np.ones((count,), dtype=bool)}
+    for key, full in (
+        ("observable", "surface_observable"),
+        ("specular", "surface_specular_support"),
+    ):
+        try:
+            masks[key] = np.asarray(gt_arrays[full], dtype=bool).reshape(count)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{full} must have shape [{count}]") from error
+    gate_list = [float(item) for item in thresholds]
+    pred, pred_w = metrics.map_point_cloud(density, grid, rel_threshold)  # validates density
+    raw = np.asarray(density, dtype=np.float64)
+    finite = np.isfinite(raw)
+    energy_pos = np.asarray(grid.centers()[np.flatnonzero(finite)], dtype=np.float64)
+    low = float(np.min(raw[finite])) if bool(np.any(finite)) else 0.0
+    energy_w = np.asarray(raw[finite] - low, dtype=np.float64)
+    origin = np.asarray(grid.origin, dtype=np.float64)
+    spacing = float(grid.spacing)
+    shape = np.asarray(grid.shape, dtype=np.float64)
+    lo = origin - spacing / 2.0
+    hi = origin + (shape - 1.0) * spacing + spacing / 2.0
+    in_box = (
+        np.all((samples >= lo) & (samples <= hi), axis=1)
+        if count > 0
+        else np.zeros((0,), dtype=bool)
+    )
+    strata: dict[str, Any] = {}
+    for stratum in SURFACE_STRATA:
+        selected = masks[stratum]
+        ref = samples[selected]
+        recall_mask = in_box[selected]
+        report = metrics.surface_report(
+            pred,
+            ref,
+            gate_list,
+            pred_weight=pred_w,
+            recall_mask=recall_mask,
+            energy_pos=energy_pos,
+            energy_weight=energy_w,
+        )
+        strata[stratum] = {
+            "num_ref": int(np.count_nonzero(recall_mask)),
+            "num_pred": int(pred.shape[0]),
+            "prf": {
+                f"{gate}": {
+                    "precision": float(score.precision),
+                    "recall": float(score.recall),
+                    "f": float(score.f_score),
+                }
+                for gate, score in zip(gate_list, report.scores, strict=True)
+            },
+            "chamfer": {
+                "accuracy": float(report.chamfer.accuracy),
+                "completeness": float(report.chamfer.completeness),
+                "chamfer": float(report.chamfer.chamfer),
+            },
+            "energy_within": {
+                f"{gate}": float(value)
+                for gate, value in zip(gate_list, report.energy, strict=True)
+            },
+        }
+    return {
+        "rel_threshold": float(rel_threshold),
+        "box": [lo.tolist(), hi.tolist()],
+        "strata": strata,
+    }
+
+
+def score_planes(
+    gt_arrays: Mapping[str, np.ndarray],
+    est_normal: np.ndarray,
+    est_offset: np.ndarray,
+    *,
+    max_angle_deg: float = metrics.PLANE_MAX_ANGLE_DEG,
+    max_offset_m: float = metrics.PLANE_MAX_OFFSET_M,
+) -> dict[str, Any]:
+    """Match estimated planes against the GT reflection planes."""
+    gt_normal = np.asarray(gt_arrays["plane_normal"], dtype=np.float64)
+    gt_offset = np.asarray(gt_arrays["plane_offset"], dtype=np.float64)
+    num_gt = int(gt_normal.shape[0])
+    points = np.asarray(gt_arrays["interaction_points"], dtype=np.float64).reshape(-1, 3)
+    planes = np.asarray(gt_arrays["interaction_plane"]).reshape(-1)
+    if points.shape[0] != planes.shape[0]:
+        raise ValueError("interaction_points and interaction_plane must share their length")
+    anchors = np.zeros((num_gt, 3), dtype=np.float64)
+    for plane in range(num_gt):
+        selected = points[planes == plane]
+        if selected.shape[0] > 0:
+            anchors[plane] = np.mean(selected, axis=0)
+    matching = metrics.match_planes(
+        est_normal,
+        est_offset,
+        gt_normal,
+        gt_offset,
+        max_angle_deg=max_angle_deg,
+        max_offset_m=max_offset_m,
+        gt_anchor=anchors,
+    )
+    matches = [
+        {
+            "est": int(est),
+            "gt": int(gt_idx),
+            "angle_deg": float(np.degrees(angle)),
+            "offset_m": float(offset),
+        }
+        for est, gt_idx, angle, offset in zip(
+            matching.est_idx, matching.gt_idx, matching.angle, matching.offset, strict=True
+        )
+    ]
+    return {
+        "num_est": int(matching.num_est),
+        "num_gt": int(matching.num_gt),
+        "tp": int(matching.tp),
+        "fp": int(matching.fp),
+        "fn": int(matching.fn),
+        **matching.summary(),
+        "matches": matches,
+    }

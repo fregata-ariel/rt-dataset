@@ -9,7 +9,7 @@ import math
 import platform
 import subprocess
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -22,7 +22,7 @@ from plateau_rt.application.rf_dataset_manifest import (
 )
 from plateau_rt.domain.rf_tomography.geometry import CaptureGeometry
 
-RESULT_SCHEMA: str = "rf_tomo_result/2"
+RESULT_SCHEMA: str = "rf_tomo_result/3"
 RUN_MANIFEST_SCHEMA: str = "rf_tomo_run/1"
 RESULTS_FILE: str = "results.jsonl"
 RUN_MANIFEST_FILE: str = "run_manifest.json"
@@ -203,6 +203,7 @@ class GroundTruth:
     vs_pos: np.ndarray | None
     path: Path | None
     sha256: str | None
+    arrays: Mapping[str, np.ndarray] = field(default_factory=dict)
 
     def positions(self, space: str) -> np.ndarray | None:
         """Return the GT points scored in ``space`` (points_pos if its space matches)."""
@@ -289,6 +290,7 @@ def load_ground_truth(path: Path | str) -> GroundTruth:
         vs_pos=vs_pos,
         path=location,
         sha256=sha256_file(location),
+        arrays=arrays,
     )
 
 

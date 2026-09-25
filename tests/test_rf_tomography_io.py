@@ -302,7 +302,7 @@ def test_validate_result_row() -> None:
     with pytest.raises(ValueError):
         tio.validate_result_row(e2)
 
-    assert tio.RESULT_SCHEMA == "rf_tomo_result/2"
+    assert tio.RESULT_SCHEMA == "rf_tomo_result/3"
 
 
 def test_result_row_io(tmp_path: Path) -> None:

@@ -1,8 +1,10 @@
-"""Core metrics for tomography reconstructions (M1, M5 and M6).
+"""Core metrics for tomography reconstructions (M1, M2, M3, M5 and M6).
 
 Non-maximum-suppression peak finding with sub-voxel refinement, Hungarian
 detection matching, FROC / average-precision scoring, decomposed localisation
-errors, global-phase / global-scale NMSE and wrapped gauge errors.
+errors, global-phase / global-scale NMSE, wrapped gauge errors, surface
+reconstruction scores (M2), reflection-plane matching (M3) and stratified
+recall.
 
 NumPy/SciPy only: nothing in this module may import Sionna, Mitsuba or Dr.Jit.
 Arrays are float64 / complex128 / int64 with SI units (metres, seconds, radians).
@@ -12,11 +14,13 @@ from __future__ import annotations
 
 import math
 import operator
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
 from scipy.ndimage import maximum_filter
 from scipy.optimize import linear_sum_assignment
+from scipy.spatial import cKDTree
 
 from plateau_rt.domain.rf_camera.delay import circular_delay_error_s
 from plateau_rt.domain.rf_tomography.geometry import VoxelGrid
@@ -725,3 +729,514 @@ def gauge_errors(
         delay=np.asarray(delay, dtype=np.float64),
         global_phase=float(global_phase),
     )
+
+
+SURFACE_THRESHOLDS_M: tuple[float, ...] = (0.5, 1.0, 2.0)
+MAP_REL_THRESHOLD: float = 0.1
+PLANE_MAX_ANGLE_DEG: float = 10.0
+PLANE_MAX_OFFSET_M: float = 1.0
+
+
+@dataclass(frozen=True)
+class SurfaceScore:
+    """Precision/recall/F-score of a point cloud against a reference at one gate."""
+
+    threshold: float
+    precision: float
+    recall: float
+    f_score: float
+    num_pred: int
+    num_ref: int
+
+
+@dataclass(frozen=True)
+class ChamferScore:
+    """Weighted mean nearest-neighbour distances between two point clouds."""
+
+    accuracy: float
+    completeness: float
+    chamfer: float
+
+
+@dataclass(frozen=True)
+class PlaneMatching:
+    """One-to-one estimated-to-GT plane assignment inside the angle/offset gates."""
+
+    est_idx: np.ndarray
+    gt_idx: np.ndarray
+    angle: np.ndarray
+    offset: np.ndarray
+    num_est: int
+    num_gt: int
+
+    @property
+    def tp(self) -> int:
+        """Number of matched pairs."""
+        return int(self.est_idx.shape[0])
+
+    @property
+    def fp(self) -> int:
+        """Number of unmatched estimated planes."""
+        return int(self.num_est) - int(self.est_idx.shape[0])
+
+    @property
+    def fn(self) -> int:
+        """Number of unmatched ground-truth planes."""
+        return int(self.num_gt) - int(self.est_idx.shape[0])
+
+    def summary(self) -> dict[str, float]:
+        """Median and P90 of the matched angles (deg) and offsets (m)."""
+        keys = ("angle_deg_median", "angle_deg_p90", "offset_m_median", "offset_m_p90")
+        if self.est_idx.shape[0] == 0:
+            return {key: float("nan") for key in keys}
+        angle_deg = np.degrees(np.asarray(self.angle, dtype=np.float64))
+        offset_m = np.asarray(self.offset, dtype=np.float64)
+        return {
+            "angle_deg_median": float(np.median(angle_deg)),
+            "angle_deg_p90": float(np.percentile(angle_deg, 90)),
+            "offset_m_median": float(np.median(offset_m)),
+            "offset_m_p90": float(np.percentile(offset_m, 90)),
+        }
+
+
+def nearest_distance(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
+    """Distance from each row of ``src`` to its nearest row of ``dst``."""
+    src_a = _as_point_cloud(src, "src")
+    dst_a = _as_point_cloud(dst, "dst")
+    if src_a.shape[0] == 0:
+        return np.zeros((0,), dtype=np.float64)
+    if not np.all(np.isfinite(src_a)):
+        raise ValueError("src must contain only finite values")
+    if not np.all(np.isfinite(dst_a)):
+        raise ValueError("dst must contain only finite values")
+    if dst_a.shape[0] == 0:
+        return np.full((src_a.shape[0],), np.inf, dtype=np.float64)
+    dist, _ = cKDTree(dst_a).query(src_a, k=1)
+    return np.asarray(dist, dtype=np.float64)
+
+
+def _as_threshold(value: float, name: str) -> float:
+    """Return ``value`` as a finite positive float."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be finite and > 0") from error
+    if not np.isfinite(result) or result <= 0.0:
+        raise ValueError(f"{name} must be finite and > 0")
+    return result
+
+
+def _as_mask(value: np.ndarray | None, length: int, name: str) -> np.ndarray:
+    """Return ``value`` as a bool ``[length]`` mask (None becomes all True)."""
+    if value is None:
+        return np.ones((length,), dtype=bool)
+    try:
+        arr = np.asarray(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must have shape [{length}] and bool dtype") from error
+    if arr.shape != (length,) or arr.dtype != np.dtype(bool):
+        raise ValueError(f"{name} must have shape [{length}] and bool dtype")
+    return np.array(arr, dtype=bool, copy=True)
+
+
+def _as_finite_cloud(value: np.ndarray, name: str) -> np.ndarray:
+    """Return ``value`` as a finite float64 ``[N, 3]`` point cloud."""
+    arr = _as_point_cloud(value, name)
+    if arr.shape[0] > 0 and not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must contain only finite values")
+    return arr
+
+
+def _as_radius(value: float, name: str) -> float:
+    """Return ``value`` as a finite float >= 0."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be finite and >= 0") from error
+    if not np.isfinite(result) or result < 0.0:
+        raise ValueError(f"{name} must be finite and >= 0")
+    return result
+
+
+def _prf_from(
+    dist_pred: np.ndarray,
+    pred_w: np.ndarray,
+    dist_ref: np.ndarray,
+    ref_w: np.ndarray,
+    gate: float,
+) -> SurfaceScore:
+    """Precision/recall/F-score from precomputed nearest distances."""
+    pred_total = float(np.sum(pred_w))
+    precision = (
+        float(np.sum(pred_w[dist_pred <= gate]) / pred_total) if pred_total > 0.0 else float("nan")
+    )
+    ref_total = float(np.sum(ref_w))
+    recall = float(np.sum(ref_w[dist_ref <= gate]) / ref_total) if ref_total > 0.0 else float("nan")
+    if not np.isfinite(recall):
+        f_score = float("nan")
+    elif not np.isfinite(precision):
+        f_score = 0.0
+    elif precision + recall > 0.0:
+        f_score = float(2.0 * precision * recall / (precision + recall))
+    else:
+        f_score = 0.0
+    return SurfaceScore(
+        threshold=float(gate),
+        precision=precision,
+        recall=recall,
+        f_score=f_score,
+        num_pred=int(dist_pred.shape[0]),
+        num_ref=int(dist_ref.shape[0]),
+    )
+
+
+def _chamfer_from(
+    dist_pred: np.ndarray, pred_w: np.ndarray, dist_ref: np.ndarray, ref_w: np.ndarray
+) -> ChamferScore:
+    """Weighted Chamfer terms from precomputed nearest distances."""
+    pred_total = float(np.sum(pred_w))
+    ref_total = float(np.sum(ref_w))
+    if pred_total == 0.0 or ref_total == 0.0:
+        nan = float("nan")
+        return ChamferScore(accuracy=nan, completeness=nan, chamfer=nan)
+    accuracy = float(np.sum(pred_w * dist_pred) / pred_total)
+    completeness = float(np.sum(ref_w * dist_ref) / ref_total)
+    return ChamferScore(
+        accuracy=accuracy, completeness=completeness, chamfer=0.5 * (accuracy + completeness)
+    )
+
+
+def _energy_from(dist: np.ndarray, weight: np.ndarray, radius: float) -> float:
+    """Fraction of ``weight`` at distance <= ``radius`` (NaN for zero total weight)."""
+    total = float(np.sum(weight))
+    if total == 0.0:
+        return float("nan")
+    return float(np.sum(weight[dist <= radius]) / total)
+
+
+def _surface_inputs(
+    pred: np.ndarray,
+    ref: np.ndarray,
+    pred_weight: np.ndarray | None,
+    ref_weight: np.ndarray | None,
+    recall_mask: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Validate and return ``(dist_pred, pred_w, dist_ref, scoped_ref_w)``."""
+    pred_a = _as_finite_cloud(pred, "pred")
+    ref_a = _as_finite_cloud(ref, "ref")
+    pred_w = _as_weights(pred_weight, pred_a.shape[0], "pred_weight")
+    ref_w = _as_weights(ref_weight, ref_a.shape[0], "ref_weight")
+    mask = _as_mask(recall_mask, ref_a.shape[0], "recall_mask")
+    dist_pred = nearest_distance(pred_a, ref_a)
+    dist_ref = nearest_distance(ref_a[mask], pred_a)
+    return dist_pred, pred_w, dist_ref, ref_w[mask]
+
+
+def surface_prf(
+    pred: np.ndarray,
+    ref: np.ndarray,
+    threshold: float,
+    *,
+    pred_weight: np.ndarray | None = None,
+    ref_weight: np.ndarray | None = None,
+    recall_mask: np.ndarray | None = None,
+) -> SurfaceScore:
+    """Precision/recall/F-score of ``pred`` against ``ref`` inside ``threshold``."""
+    gate = _as_threshold(threshold, "threshold")
+    dist_pred, pred_w, dist_ref, ref_w = _surface_inputs(
+        pred, ref, pred_weight, ref_weight, recall_mask
+    )
+    return _prf_from(dist_pred, pred_w, dist_ref, ref_w, gate)
+
+
+def weighted_chamfer(
+    pred: np.ndarray,
+    ref: np.ndarray,
+    *,
+    pred_weight: np.ndarray | None = None,
+    ref_weight: np.ndarray | None = None,
+    recall_mask: np.ndarray | None = None,
+) -> ChamferScore:
+    """Weighted mean nearest-neighbour distances between ``pred`` and ``ref``."""
+    dist_pred, pred_w, dist_ref, ref_w = _surface_inputs(
+        pred, ref, pred_weight, ref_weight, recall_mask
+    )
+    return _chamfer_from(dist_pred, pred_w, dist_ref, ref_w)
+
+
+def energy_within(pos: np.ndarray, weight: np.ndarray, ref: np.ndarray, radius: float) -> float:
+    """Fraction of ``weight`` within ``radius`` of the reference cloud ``ref``."""
+    pos_a = _as_finite_cloud(pos, "pos")
+    ref_a = _as_finite_cloud(ref, "ref")
+    if weight is None:
+        raise ValueError("weight must be finite and >= 0 with shape [N]")
+    point_w = _as_weights(weight, pos_a.shape[0], "weight")
+    return _energy_from(nearest_distance(pos_a, ref_a), point_w, _as_radius(radius, "radius"))
+
+
+@dataclass(frozen=True)
+class SurfaceReport:
+    """P/R/F at several gates, weighted Chamfer and energy fractions of one prediction."""
+
+    scores: tuple[SurfaceScore, ...]
+    chamfer: ChamferScore
+    energy: tuple[float, ...]
+
+
+def surface_report(
+    pred: np.ndarray,
+    ref: np.ndarray,
+    thresholds: Sequence[float],
+    *,
+    pred_weight: np.ndarray | None = None,
+    recall_mask: np.ndarray | None = None,
+    energy_pos: np.ndarray | None = None,
+    energy_weight: np.ndarray | None = None,
+) -> SurfaceReport:
+    """Score ``pred`` against ``ref`` at every gate with one nearest-distance pass.
+
+    Equals ``surface_prf`` (unweighted) per gate, ``weighted_chamfer`` with
+    ``pred_weight`` and ``energy_within(energy_pos, energy_weight, ref, gate)``
+    per gate (``energy`` is empty when ``energy_pos`` is None).
+    """
+    gates = [_as_threshold(gate, "thresholds") for gate in thresholds]
+    dist_pred, pred_w, dist_ref, ref_w = _surface_inputs(pred, ref, pred_weight, None, recall_mask)
+    ones = np.ones_like(pred_w)
+    scores = tuple(_prf_from(dist_pred, ones, dist_ref, ref_w, gate) for gate in gates)
+    energy: tuple[float, ...] = ()
+    if energy_pos is not None:
+        pos_a = _as_finite_cloud(energy_pos, "energy_pos")
+        if energy_weight is None:
+            raise ValueError("energy_weight is required with energy_pos")
+        energy_w = _as_weights(energy_weight, pos_a.shape[0], "energy_weight")
+        dist_energy = nearest_distance(pos_a, _as_finite_cloud(ref, "ref"))
+        energy = tuple(_energy_from(dist_energy, energy_w, gate) for gate in gates)
+    return SurfaceReport(
+        scores=scores,
+        chamfer=_chamfer_from(dist_pred, pred_w, dist_ref, ref_w),
+        energy=energy,
+    )
+
+
+def map_point_cloud(
+    density: np.ndarray, grid: VoxelGrid, rel_threshold: float = MAP_REL_THRESHOLD
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extract a weighted point cloud from ``density`` above a relative level."""
+    if not isinstance(grid, VoxelGrid):
+        raise ValueError("grid must be a VoxelGrid")
+    if np.iscomplexobj(density):
+        raise ValueError("density must be real")
+    try:
+        raw = np.asarray(density, dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise ValueError("density must be a real array") from error
+    if raw.shape != tuple(grid.shape):
+        raise ValueError("density shape must match grid.shape")
+    try:
+        level_rel = float(rel_threshold)
+    except (TypeError, ValueError) as error:
+        raise ValueError("rel_threshold must be finite and in [0, 1]") from error
+    if not np.isfinite(level_rel) or level_rel < 0.0 or level_rel > 1.0:
+        raise ValueError("rel_threshold must be finite and in [0, 1]")
+    finite = np.isfinite(raw)
+    if not bool(np.any(finite)):
+        return np.zeros((0, 3), dtype=np.float64), np.zeros((0,), dtype=np.float64)
+    low = float(np.min(raw[finite]))
+    high = float(np.max(raw[finite]))
+    if not high > low:
+        return np.zeros((0, 3), dtype=np.float64), np.zeros((0,), dtype=np.float64)
+    level = low + level_rel * (high - low)
+    flats = np.flatnonzero(finite & (raw >= level))
+    positions = np.asarray(grid.centers()[flats], dtype=np.float64)
+    weights = np.asarray(raw.ravel(order="C")[flats] - low, dtype=np.float64)
+    return positions, weights
+
+
+def _as_planes(
+    normal: np.ndarray, offset: np.ndarray, normal_name: str, offset_name: str
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(normal, offset)`` as float64 ``[K, 3]`` / ``[K]`` plane pairs."""
+    if np.iscomplexobj(normal) or np.iscomplexobj(offset):
+        raise ValueError(f"{normal_name} and {offset_name} must be real")
+    try:
+        vec = np.asarray(normal, dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{normal_name} must be a real array") from error
+    try:
+        dist = np.asarray(offset, dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{offset_name} must be a real array") from error
+    if vec.size == 0 and dist.size == 0:
+        return np.zeros((0, 3), dtype=np.float64), np.zeros((0,), dtype=np.float64)
+    if vec.ndim == 1:
+        if vec.shape != (3,):
+            raise ValueError(f"{normal_name} must have shape [K, 3]")
+        vec = vec[None, :]
+    if vec.ndim != 2 or vec.shape[1] != 3:
+        raise ValueError(f"{normal_name} must have shape [K, 3]")
+    count = vec.shape[0]
+    if dist.ndim == 0:
+        dist = np.full((count,), float(dist), dtype=np.float64)
+    if dist.shape != (count,):
+        raise ValueError(f"{offset_name} must have shape [{count}]")
+    if not np.all(np.isfinite(vec)) or not np.all(np.isfinite(dist)):
+        raise ValueError(f"{normal_name} and {offset_name} must contain only finite values")
+    norms = np.linalg.norm(vec, axis=1)
+    if np.any(norms == 0.0):
+        raise ValueError(f"{normal_name} must have no zero row")
+    return np.asarray(vec, dtype=np.float64), np.asarray(dist, dtype=np.float64)
+
+
+def _as_anchor(value: np.ndarray | None, count: int, name: str) -> np.ndarray:
+    """Return ``value`` as a finite float64 ``[count, 3]`` anchor set (origin default)."""
+    if value is None:
+        return np.zeros((count, 3), dtype=np.float64)
+    if np.iscomplexobj(value):
+        raise ValueError(f"{name} must be real")
+    try:
+        arr = np.asarray(value, dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{name} must be a real array") from error
+    if arr.size == 0 and count == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    if arr.shape != (count, 3):
+        raise ValueError(f"{name} must have shape [{count}, 3]")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} must contain only finite values")
+    return arr
+
+
+def plane_errors(
+    est_normal: np.ndarray,
+    est_offset: np.ndarray,
+    gt_normal: np.ndarray,
+    gt_offset: np.ndarray,
+    *,
+    gt_anchor: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Angular (rad) and anchored offset (m) errors of estimated planes vs GT."""
+    est_n, est_d = _as_planes(est_normal, est_offset, "est_normal", "est_offset")
+    gt_n, gt_d = _as_planes(gt_normal, gt_offset, "gt_normal", "gt_offset")
+    if est_n.shape[0] != gt_n.shape[0]:
+        raise ValueError("est and gt plane sets must have the same length")
+    count = est_n.shape[0]
+    anchors = _as_anchor(gt_anchor, count, "gt_anchor")
+    est_hat = est_n / np.linalg.norm(est_n, axis=1)[:, None]
+    est_off = est_d / np.linalg.norm(est_n, axis=1)
+    gt_hat = gt_n / np.linalg.norm(gt_n, axis=1)[:, None]
+    gt_off = gt_d / np.linalg.norm(gt_n, axis=1)
+    cos_angle = np.clip(np.abs(np.einsum("ij,ij->i", est_hat, gt_hat)), 0.0, 1.0)
+    angle = np.arccos(cos_angle)
+    anchored = anchors - ((np.einsum("ij,ij->i", gt_hat, anchors) - gt_off)[:, None] * gt_hat)
+    offset = np.abs(np.einsum("ij,ij->i", est_hat, anchored) - est_off)
+    return np.asarray(angle, dtype=np.float64), np.asarray(offset, dtype=np.float64)
+
+
+def match_planes(
+    est_normal: np.ndarray,
+    est_offset: np.ndarray,
+    gt_normal: np.ndarray,
+    gt_offset: np.ndarray,
+    *,
+    max_angle_deg: float = PLANE_MAX_ANGLE_DEG,
+    max_offset_m: float = PLANE_MAX_OFFSET_M,
+    gt_anchor: np.ndarray | None = None,
+) -> PlaneMatching:
+    """Match estimated planes to GT planes with maximum cardinality first."""
+    est_n, est_d = _as_planes(est_normal, est_offset, "est_normal", "est_offset")
+    gt_n, gt_d = _as_planes(gt_normal, gt_offset, "gt_normal", "gt_offset")
+    anchors = _as_anchor(gt_anchor, gt_n.shape[0], "gt_anchor")
+    try:
+        max_angle = math.radians(float(max_angle_deg))
+    except (TypeError, ValueError) as error:
+        raise ValueError("max_angle_deg must be finite and > 0") from error
+    if not np.isfinite(max_angle) or max_angle <= 0.0:
+        raise ValueError("max_angle_deg must be finite and > 0")
+    try:
+        max_offset = float(max_offset_m)
+    except (TypeError, ValueError) as error:
+        raise ValueError("max_offset_m must be finite and > 0") from error
+    if not np.isfinite(max_offset) or max_offset <= 0.0:
+        raise ValueError("max_offset_m must be finite and > 0")
+    num_est, num_gt = est_n.shape[0], gt_n.shape[0]
+    empty = (
+        np.zeros((0,), dtype=np.int64),
+        np.zeros((0,), dtype=np.int64),
+        np.zeros((0,), dtype=np.float64),
+        np.zeros((0,), dtype=np.float64),
+    )
+    if num_est == 0 or num_gt == 0:
+        est_idx, gt_idx, angle, offset = empty
+        return PlaneMatching(
+            est_idx=est_idx,
+            gt_idx=gt_idx,
+            angle=angle,
+            offset=offset,
+            num_est=int(num_est),
+            num_gt=int(num_gt),
+        )
+    est_rows = np.repeat(np.arange(num_est), num_gt)
+    gt_rows = np.tile(np.arange(num_gt), num_est)
+    angle_flat, offset_flat = plane_errors(
+        est_n[est_rows], est_d[est_rows], gt_n[gt_rows], gt_d[gt_rows], gt_anchor=anchors[gt_rows]
+    )
+    angle_all = angle_flat.reshape(num_est, num_gt)
+    offset_all = offset_flat.reshape(num_est, num_gt)
+    admissible = (angle_all <= max_angle) & (offset_all <= max_offset)
+    big = 4.0 * (min(num_est, num_gt) + 1)
+    cost = np.where(admissible, angle_all / max_angle + offset_all / max_offset, big).astype(
+        np.float64
+    )
+    rows, cols = linear_sum_assignment(cost)
+    keep = admissible[rows, cols]
+    rows = np.asarray(rows[keep], dtype=np.int64)
+    cols = np.asarray(cols[keep], dtype=np.int64)
+    order = np.argsort(rows, kind="stable")
+    rows, cols = rows[order], cols[order]
+    return PlaneMatching(
+        est_idx=rows,
+        gt_idx=cols,
+        angle=np.array(angle_all[rows, cols], dtype=np.float64),
+        offset=np.array(offset_all[rows, cols], dtype=np.float64),
+        num_est=int(num_est),
+        num_gt=int(num_gt),
+    )
+
+
+def stratified_recall(
+    matching: Matching,
+    labels: np.ndarray | list[str] | tuple[str, ...],
+    *,
+    gt_weight: np.ndarray | None = None,
+) -> dict[str, dict[str, float | int]]:
+    """Per-label recall of a ``Matching`` over the GT ``labels``."""
+    if not isinstance(matching, Matching):
+        raise ValueError("matching must be a Matching")
+    num_gt = int(matching.num_gt)
+    try:
+        items = list(labels)
+    except TypeError as error:
+        raise ValueError("labels must have one entry per GT point") from error
+    if len(items) != num_gt:
+        raise ValueError(f"labels must have length {num_gt}, got {len(items)}")
+    for item in items:
+        if not isinstance(item, str):
+            raise ValueError("labels must all be str")
+    weights = _as_weights(gt_weight, num_gt, "gt_weight")
+    matched = np.zeros((num_gt,), dtype=bool)
+    matched[np.asarray(matching.gt_idx, dtype=np.int64)] = True
+    out: dict[str, dict[str, float | int]] = {}
+    for label in sorted(set(items)):
+        selected = np.array([item == label for item in items], dtype=bool)
+        count = int(np.count_nonzero(selected))
+        hits = int(np.count_nonzero(selected & matched))
+        total = float(np.sum(weights[selected]))
+        out[label] = {
+            "num_gt": count,
+            "tp": hits,
+            "recall": float(hits / count),
+            "weighted_recall": (
+                float(np.sum(weights[selected & matched]) / total) if total > 0.0 else float("nan")
+            ),
+        }
+    return out
