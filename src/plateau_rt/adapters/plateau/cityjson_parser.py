@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from plateau_rt.domain.models import Building, MaterialType, Scene, Surface, SurfaceType
+from plateau_rt.domain.scene_transform import SceneTransform
 
 
 class CityJSONAdapter:
@@ -92,8 +93,24 @@ class CityJSONAdapter:
             if surfaces:
                 buildings.append(Building(building_id=obj_id, surfaces=surfaces))
 
+        metadata = cm_dict.get("metadata")
+        source_crs: str | None = None
+        if isinstance(metadata, dict):
+            reference = metadata.get("referenceSystem")
+            if isinstance(reference, str) and reference:
+                source_crs = reference
+            elif reference is not None:
+                source_crs = str(reference)
+            else:
+                source_crs = None
+
         return Scene(
-            scene_id=self.file_path.stem, buildings=buildings, center_lat_lon=(offset[0], offset[1])
+            scene_id=self.file_path.stem,
+            buildings=buildings,
+            transform=SceneTransform(
+                origin_projected_xyz=offset,
+                source_crs=source_crs,
+            ),
         )
 
     def _extract_surfaces(

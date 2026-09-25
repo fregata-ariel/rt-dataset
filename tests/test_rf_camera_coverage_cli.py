@@ -300,3 +300,20 @@ def test_radio_map_reuse_warns_on_other_scene(scene_xml: Path, tmp_path: Path) -
     )
     assert other.exit_code == 0, other.output
     assert "warning: the saved radio map was computed on" in other.output
+
+
+def test_tx_power_dbm_default_is_44(scene_xml: Path, tmp_path: Path) -> None:
+    """A default ring run records tx_power_dbm 44.0."""
+    result = CliRunner().invoke(cli, ["rf-camera-multiview", str(scene_xml), str(tmp_path / "out")])
+    assert result.exit_code == 0, result.output
+    assert FakeDataset.instances[-1].config.tx_power_dbm == 44.0
+
+
+def test_tx_power_dbm_option_is_recorded(scene_xml: Path, tmp_path: Path) -> None:
+    """--tx-power-dbm 30 records tx_power_dbm 30.0."""
+    result = CliRunner().invoke(
+        cli,
+        ["rf-camera-multiview", str(scene_xml), str(tmp_path / "out"), "--tx-power-dbm", "30"],
+    )
+    assert result.exit_code == 0, result.output
+    assert FakeDataset.instances[-1].config.tx_power_dbm == 30.0

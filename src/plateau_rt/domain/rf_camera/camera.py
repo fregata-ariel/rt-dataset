@@ -28,6 +28,40 @@ HEMISPHERES = ("front", "back")
 IMAGE_QUANTITY = "solid_angle_amplitude"
 
 
+def image_axes_payload() -> dict[str, Any]:
+    """Machine-readable [row, col] axis convention of every RF-camera image array."""
+    return {
+        "array_axes": ["row", "col"],
+        "row": "+kz (up)",
+        "col": "+ky (camera left)",
+        "row_coordinate": "kz_over_k",
+        "col_coordinate": "ky_over_k",
+        "row_index_increases_toward": "+kz",
+        "col_index_increases_toward": "+ky",
+        "row_0": "-kz (bottom)",
+        "col_0": "-ky (camera right)",
+        "display_origin": "lower",
+        "mirrored_vs_pinhole_photo": True,
+        "to_pinhole_photo_orientation": "np.flip(image, axis=(0, 1))",
+    }
+
+
+def channel_gain_reference_payload() -> dict[str, Any]:
+    """What the stored complex channel values are referenced to (unit transmit power)."""
+    return {
+        "reference": "unit_transmit_power",
+        "tx_power_applied": False,
+        "definition": (
+            "aperture_cfr and the path_geometry_gt amplitudes are Sionna channel "
+            "coefficients for unit transmit power (Paths.cfr(normalize=False)): "
+            "dimensionless, including the Tx and Rx antenna patterns and all propagation "
+            "losses, so |H|^2 is the path gain; the developed angular images are linear "
+            "transforms of aperture_cfr. config.tx_power_dbm is recorded but not applied "
+            "to any stored array: received power [W] = 10**((tx_power_dbm - 30) / 10) * |H|^2."
+        ),
+    }
+
+
 @dataclass(frozen=True)
 class RFViewSpec:
     """One RF-camera pose."""

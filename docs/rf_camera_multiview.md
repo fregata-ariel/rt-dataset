@@ -462,6 +462,11 @@ This is the intended bridge to a Gaussian-Splatting camera model.
 
 Besides the configuration and frequency grid, `dataset_manifest.json` records
 
+- `provenance`: when and how the dataset was generated (see below);
+- `config.tx_power_dbm` (BS transmit power, recorded only) and
+  `config.channel_gain_reference` (what the stored channels are referenced to);
+- `scene_transform`: the scene-local coordinate origin copied from the build
+  manifest (absent for scenes built before it existed);
 - `config.tx_positions` (list of 3-vectors) plus optional `tx_look_ats`:
   `config.tx_position` was replaced by `config.tx_positions` and
   `RFMultiViewConfig(tx_position=...)` no longer exists (breaking change);
@@ -469,8 +474,8 @@ Besides the configuration and frequency grid, `dataset_manifest.json` records
 - `raw_observation`: axis order (`bs`, `hemisphere`, `row`, `col`,
   `frequency_offset`), BS ids and hemisphere names of `aperture_cfr`, and the
   Rx element pattern;
-- `camera_model`: projection, developed hemisphere and the image quantity
-  definition;
+- `camera_model`: projection, developed hemisphere, the image quantity
+  definition and the `image_axes` convention payload;
 - `path_geometry_gt`: artifact file name (`path_geometry_gt.npz`) of the
   path-level ground truth;
 - `path_schema`: artifact file name (`path_schema.json`) of its single
@@ -481,6 +486,76 @@ Besides the configuration and frequency grid, `dataset_manifest.json` records
   `bs_in_front_hemisphere` and `hemisphere_energy`, the sum of
   `|aperture_cfr|^2` per hemisphere), so views with back-hemisphere energy
   can be found without loading the arrays.
+
+## Provenance, power reference, scene transform and image axes
+
+Both the scene-build `manifest.json` and the dataset `dataset_manifest.json`
+carry a `provenance` section (see
+`src/plateau_rt/application/provenance.py`):
+
+- `generated_at_utc`: creation time (`YYYY-MM-DDTHH:MM:SSZ`);
+- `python_version`: the generating interpreter;
+- `packages`: installed versions of `sionna_rt`, `mitsuba`, `drjit` and
+  `numpy` (each `str | null`, read from the package metadata without
+  importing the package);
+- `sionna_rt_commit` / `sionna_rt_commit_source`: the Sionna fork commit,
+  found from the `PLATEAU_RT_SIONNA_COMMIT` environment variable first
+  (source `env:PLATEAU_RT_SIONNA_COMMIT`), else read from the git files of
+  the `third_party/sionna-rt` checkout (source `submodule_checkout`), else
+  null. This is the commit checked out in the repository, which matches the
+  installed `sionna_rt` only when the Docker image was built from that
+  checkout. A git worktree mounted into the container points at a git
+  directory outside the mount, so both commits are null there;
+- `plateau_rt_commit`: this repository's HEAD commit read from its git
+  files (null when unavailable);
+- `command` / `argv`: the invoking command line.
+
+Transmit power: every BS transmits with `config.tx_power_dbm`
+(`--tx-power-dbm`, default 44 dBm = Sionna's default). The stored complex
+channels are Sionna path coefficients for **unit transmit power**
+(`Paths.cfr(normalize=False)`): dimensionless, including the Tx/Rx antenna
+patterns and all propagation losses, so `|H|^2` is the path gain, and the
+developed angular images are linear transforms of `aperture_cfr`. The power
+is recorded but not applied to any stored array; see
+`config.channel_gain_reference`:
+
+```text
+received power [W] = 10**((tx_power_dbm - 30) / 10) * |H|^2
+```
+
+Scene transform: the build manifest records `scene_transform`, the pure
+translation between the source projected CRS and scene-local coordinates:
+
+```text
+local_xyz = projected_xyz - origin_projected_xyz = projected_xyz + translation_xyz
+```
+
+`origin_projected_xyz` is `[x, y, z]` with x/y the centre of the CityJSON
+vertex bounding box and z the minimum vertex z (both after the CityJSON
+scale/translate); `translation_xyz = -origin_projected_xyz`;
+`source_crs` is the CityJSON `metadata.referenceSystem` string (or null).
+The dataset writer copies this payload into `dataset_manifest.json` as
+`scene_transform` when the build manifest next to the scene XML has a
+non-legacy transform. `center_lat_lon` is kept in the build manifest as a
+deprecated, mislabelled alias of the projected x/y origin for old readers;
+the typed reader maps an old build manifest's `center_lat_lon` to a legacy
+`SceneTransform` with unknown z (NaN).
+
+Image axes: every RF-camera image array is indexed `[row, col]` with
+`kz_over_k` strictly increasing along rows and `ky_over_k` strictly
+increasing along columns, recorded as `camera_model.image_axes`: row 0 is
+`-kz` (bottom), col 0 is `-ky` (camera right; local +y is the camera's
+left), debug PNGs use `origin="lower"`. This is left-right mirrored relative
+to the pinhole photo (whose row 0 is the top, +z, and col 0 is the camera
+left, +y); `np.flip(image, axis=(0, 1))` puts an RF image into pinhole-photo
+orientation.
+
+Reader API (`plateau_rt.application.rf_dataset_manifest`):
+`dataset.provenance`, `dataset.tx_power_dbm`,
+`dataset.channel_gain_reference`, `dataset.image_axes`,
+`dataset.scene_transform` and `load_scene_transform(path)` for build
+manifests (a build directory or the `manifest.json` file). All of them are
+`None` for old datasets written before these sections existed.
 
 ## Reading a dataset
 

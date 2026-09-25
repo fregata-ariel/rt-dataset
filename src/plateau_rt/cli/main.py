@@ -333,6 +333,13 @@ def _plan_coverage_views(
 @click.option("--max-depth", type=int, default=5, show_default=True)
 @click.option("--synthetic-array/--explicit-array", default=True, show_default=True)
 @click.option(
+    "--tx-power-dbm",
+    type=float,
+    default=44.0,
+    show_default=True,
+    help="BS transmit power [dBm]; recorded in the manifest, not applied to the stored CFR",
+)
+@click.option(
     "--placement",
     type=click.Choice(["ring", "coverage"]),
     default="ring",
@@ -482,6 +489,7 @@ def rf_camera_multiview(
     frequency_bins: int,
     max_depth: int,
     synthetic_array: bool,
+    tx_power_dbm: float,
     placement: str,
     placement_seed: int,
     pl_threshold_mode: str,
@@ -543,6 +551,7 @@ def rf_camera_multiview(
         rx_cols=rx_cols,
         max_depth=max_depth,
         synthetic_array=synthetic_array,
+        tx_power_dbm=tx_power_dbm,
     )
 
     if placement == "ring":

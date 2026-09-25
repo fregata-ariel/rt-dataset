@@ -10,6 +10,7 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -20,7 +21,9 @@ from plateau_rt.application.rf_dataset_manifest import (
     ManifestError,
     RFDatasetManifest,
     load_rf_dataset_manifest,
+    load_scene_transform,
 )
+from plateau_rt.domain.rf_camera.camera import image_axes_payload
 from plateau_rt.domain.rf_camera.optical import (
     PinholeIntrinsics,
     local_to_world_rays,
@@ -403,6 +406,116 @@ def check_path_geometry(
     )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def check_manifest_metadata(c: Checker, mock_out: Path) -> None:
+    """Provenance, power reference, scene transform and image axes (issue #23)."""
+    print("--- manifest metadata (provenance / power / transform / axes) ---")
+    build_manifest_path = mock_out / "manifest.json"
+    if not c.exists(build_manifest_path):
+        return
+    build_manifest = json.loads(build_manifest_path.read_text())
+    try:
+        transform = load_scene_transform(mock_out)
+    except ManifestError as exc:
+        c.check(False, f"build manifest scene transform readable: {exc}")
+        return
+    c.check(transform is not None, "build manifest has a scene_transform")
+    if transform is None:
+        return
+    c.check(not transform.legacy, "build manifest scene transform is not legacy")
+    provenance = build_manifest.get("provenance")
+    c.check(isinstance(provenance, dict), "build manifest has a provenance dict")
+    if isinstance(provenance, dict):
+        packages = provenance.get("packages", {})
+        for name in ("sionna_rt", "mitsuba", "drjit", "numpy"):
+            c.check(
+                isinstance(packages.get(name), str) and bool(packages[name]),
+                f"build provenance package {name} is a non-empty string",
+            )
+
+    source_file = build_manifest.get("source_file")
+    raw_path = REPO_ROOT / "data/raw" / str(source_file)
+    if c.check(raw_path.is_file(), f"build source file readable: {raw_path.name}"):
+        raw = json.loads(raw_path.read_text())
+        raw_vertices = raw.get("vertices", [])
+        city_transform = raw.get("transform", {})
+        scale = np.asarray(city_transform.get("scale", [1.0, 1.0, 1.0]), dtype=np.float64)
+        translate = np.asarray(city_transform.get("translate", [0.0, 0.0, 0.0]), dtype=np.float64)
+        decoded = np.asarray(raw_vertices, dtype=np.float64) * scale + translate
+        local = transform.to_local(decoded)
+        c.check(
+            bool(
+                np.allclose(np.min(local, axis=0), MOCK_BOX_MIN, atol=1e-9, rtol=0.0)
+                and np.allclose(np.max(local, axis=0), MOCK_BOX_MAX, atol=1e-9, rtol=0.0)
+            ),
+            "scene transform maps decoded vertices onto the mock scene-local box",
+        )
+        round_tripped = transform.to_projected(transform.to_local(decoded))
+        c.check(
+            bool(np.allclose(round_tripped, decoded, atol=1e-9, rtol=0.0)),
+            "scene transform round trip to_projected(to_local(v)) == v",
+        )
+
+    mv = mock_out / "rf_camera_multiview"
+    dataset = load_dataset(c, mv)
+    if dataset is None:
+        return
+    c.check(dataset.provenance is not None, "dataset manifest has provenance")
+    if dataset.provenance is not None:
+        packages = dataset.provenance.get("packages", {})
+        for name in ("sionna_rt", "mitsuba", "drjit", "numpy"):
+            value = packages.get(name) if isinstance(packages, dict) else None
+            c.check(
+                isinstance(value, str) and bool(value),
+                f"dataset provenance package {name} is a non-empty string",
+            )
+        generated = dataset.provenance.get("generated_at_utc")
+        generated_ok = False
+        if isinstance(generated, str):
+            try:
+                datetime.strptime(generated, "%Y-%m-%dT%H:%M:%SZ")
+                generated_ok = True
+            except ValueError:
+                generated_ok = False
+        c.check(generated_ok, "dataset provenance generated_at_utc parses as UTC")
+        argv = dataset.provenance.get("argv")
+        c.check(
+            isinstance(argv, list) and "rf-camera-multiview" in argv,
+            "dataset provenance argv records rf-camera-multiview",
+        )
+        python_version = dataset.provenance.get("python_version")
+        c.check(
+            isinstance(python_version, str) and bool(python_version),
+            "dataset provenance python_version is a non-empty string",
+        )
+    c.check(dataset.tx_power_dbm == 44.0, f"dataset tx_power_dbm == 44.0 ({dataset.tx_power_dbm})")
+    c.check(
+        isinstance(dataset.channel_gain_reference, dict)
+        and dataset.channel_gain_reference.get("reference") == "unit_transmit_power",
+        "dataset channel_gain_reference is unit_transmit_power",
+    )
+    c.check(
+        dataset.image_axes == image_axes_payload(),
+        "dataset camera_model image_axes matches image_axes_payload()",
+    )
+    if c.exists(dataset.camera_model_path):
+        model = np.load(dataset.camera_model_path)
+        kz_over_k = np.asarray(model["kz_over_k"]).ravel()
+        ky_over_k = np.asarray(model["ky_over_k"]).ravel()
+        c.check(bool(np.all(np.diff(kz_over_k) > 0)), "camera_model kz_over_k increases along rows")
+        c.check(bool(np.all(np.diff(ky_over_k) > 0)), "camera_model ky_over_k increases along cols")
+    c.check(dataset.scene_transform is not None, "dataset manifest has a scene_transform")
+    if dataset.scene_transform is not None:
+        c.check(
+            tuple(dataset.scene_transform.origin_projected_xyz)
+            == tuple(transform.origin_projected_xyz)
+            and dataset.scene_transform.source_crs == transform.source_crs,
+            "dataset scene_transform equals the build manifest transform",
+        )
+
+
 def load_dataset(c: Checker, mv: Path) -> RFDatasetManifest | None:
     """共有リーダーで dataset_manifest.json を読む。失敗は NG として記録する。"""
     try:
@@ -646,6 +759,7 @@ def main() -> None:
     check_scene_and_coverage(c, args.mock_out)
     check_rf_camera(c, args.mock_out / "rf_camera")
     check_multiview(c, args.mock_out / "rf_camera_multiview", args.num_views, args.num_bs)
+    check_manifest_metadata(c, args.mock_out)
     check_optical(c, args.mock_out / "rf_camera_multiview")
 
     if c.failures:

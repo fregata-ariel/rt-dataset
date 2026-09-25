@@ -1,5 +1,6 @@
 """Multi-BS config validation, zero-energy delay, and CLI count checks."""
 
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -141,3 +142,12 @@ def test_cli_bs_look_at_count_mismatch(tmp_path):
     )
     assert result.exit_code == 2
     assert "--bs-look-at" in result.output
+
+
+def test_tx_power_dbm_default_and_validation():
+    """tx_power_dbm defaults to 44 dBm and rejects non-finite values."""
+    assert RFMultiViewConfig().tx_power_dbm == 44.0
+    for bad in (float("inf"), float("nan"), True):
+        with pytest.raises(ValueError):
+            RFMultiViewConfig(tx_power_dbm=bad).validate()
+    assert "tx_power_dbm" in asdict(RFMultiViewConfig())

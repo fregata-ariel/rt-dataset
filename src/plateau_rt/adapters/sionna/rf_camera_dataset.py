@@ -37,6 +37,12 @@ from plateau_rt.adapters.sionna.rf_tracing import (
     path_ground_truth,
     trace_paths,
 )
+from plateau_rt.application.provenance import collect_provenance
+from plateau_rt.application.rf_dataset_manifest import (
+    BUILD_MANIFEST_FILE_NAME,
+    ManifestError,
+    load_scene_transform,
+)
 from plateau_rt.application.scene_checks import check_scene_carrier_frequency
 from plateau_rt.domain.rf_camera.calibration import (
     calibrate_angular_cfr,
@@ -48,6 +54,8 @@ from plateau_rt.domain.rf_camera.camera import (
     PROJECTION,
     RFViewSpec,
     build_direction_cosine_camera_model,
+    channel_gain_reference_payload,
+    image_axes_payload,
     to_solid_angle_amplitude,
     view_pose_payload,
 )
@@ -109,6 +117,7 @@ class RFMultiViewConfig:
     horizontal_spacing_lambda: float = 0.5
     tx_pattern: str = "tr38901"
     polarization: str = "V"
+    tx_power_dbm: float = 44.0
 
     fft_rows: int = 128
     fft_cols: int = 128
@@ -137,6 +146,12 @@ class RFMultiViewConfig:
             raise ValueError("antenna spacing must be > 0")
         if self.fft_rows < self.rx_rows or self.fft_cols < self.rx_cols:
             raise ValueError("FFT grid must not be smaller than the receive aperture")
+        if (
+            isinstance(self.tx_power_dbm, bool)
+            or not isinstance(self.tx_power_dbm, (int, float, np.integer, np.floating))
+            or not math.isfinite(float(self.tx_power_dbm))
+        ):
+            raise ValueError("tx_power_dbm must be a finite number")
 
     def resolve_base_stations(
         self,
@@ -171,6 +186,7 @@ class RFMultiViewDataset:
         views: list[RFViewSpec],
         config: RFMultiViewConfig | None = None,
         placement: Mapping[str, Any] | None = None,
+        provenance: Mapping[str, Any] | None = None,
     ):
         if not views:
             raise ValueError("at least one RF view is required")
@@ -179,6 +195,9 @@ class RFMultiViewDataset:
         self.config = config or RFMultiViewConfig()
         self.config.validate()
         self.placement = dict(placement) if placement is not None else None
+        self.provenance: dict[str, Any] | None = (
+            dict(provenance) if provenance is not None else None
+        )
 
     def run(self, output_dir: Path) -> Path:
         output_dir = Path(output_dir)
@@ -206,6 +225,7 @@ class RFMultiViewDataset:
                     name=f"rf_camera_{bs_id}",
                     position=list(position),
                     look_at=list(look_at),
+                    power_dbm=cfg.tx_power_dbm,
                 )
             )
 
@@ -297,8 +317,14 @@ class RFMultiViewDataset:
         manifest = {
             "schema_version": 3,
             "mode": "multibs_multiue_rf_camera_dataset",
+            "provenance": (
+                self.provenance if self.provenance is not None else collect_provenance()
+            ),
             "source_scene": str(self.xml_path),
-            "config": asdict(cfg),
+            "config": {
+                **asdict(cfg),
+                "channel_gain_reference": channel_gain_reference_payload(),
+            },
             "frequency_offsets_hz": frequency_offsets_hz.tolist(),
             "absolute_frequencies_hz": (cfg.carrier_frequency_hz + frequency_offsets_hz).tolist(),
             "delay_resolution_s": 1.0 / cfg.bandwidth_hz,
@@ -339,18 +365,22 @@ class RFMultiViewDataset:
                     "solid_angle_weight). Back-hemisphere arrivals are excluded, like light "
                     "behind an optical camera."
                 ),
+                "image_axes": image_axes_payload(),
             },
             "path_geometry_gt": PATH_GEOMETRY_GT_FILE_NAME,
             "path_schema": PATH_SCHEMA_FILE_NAME,
             "views": manifest_views,
         }
-        if self.placement is not None:
-            ordered: dict[str, Any] = {}
-            for key, value in manifest.items():
-                ordered[key] = value
-                if key == "base_stations":
-                    ordered["placement"] = self.placement
-            manifest = ordered
+        # Optional sections keep their documented positions in the manifest.
+        scene_transform = self._build_manifest_scene_transform()
+        ordered: dict[str, Any] = {}
+        for key, value in manifest.items():
+            ordered[key] = value
+            if key == "source_scene" and scene_transform is not None:
+                ordered["scene_transform"] = scene_transform
+            if key == "base_stations" and self.placement is not None:
+                ordered["placement"] = self.placement
+        manifest = ordered
         manifest_path = output_dir / "dataset_manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
 
@@ -359,6 +389,31 @@ class RFMultiViewDataset:
         print(f"camera model: {camera_model_path}")
         print(f"path geometry GT: {path_gt_path}")
         return manifest_path
+
+    def _build_manifest_scene_transform(self) -> dict[str, Any] | None:
+        """Return the build manifest's scene-transform payload, if usable.
+
+        Reads ``manifest.json`` next to the source scene and returns its
+        non-legacy transform payload. Prints one line and returns None when
+        the build manifest is missing, has no transform, is legacy-only or
+        is malformed (the run continues without ``scene_transform``).
+        """
+        build_manifest = self.xml_path.parent / BUILD_MANIFEST_FILE_NAME
+        if not build_manifest.is_file():
+            print(f"scene_transform: no build manifest at {build_manifest}, omitting")
+            return None
+        try:
+            transform = load_scene_transform(build_manifest)
+        except ManifestError as exc:
+            print(f"scene_transform: unreadable build manifest {build_manifest}: {exc}")
+            return None
+        if transform is None:
+            print(f"scene_transform: no transform in build manifest {build_manifest}, omitting")
+            return None
+        if transform.legacy:
+            print(f"scene_transform: build manifest {build_manifest} is legacy-only, omitting")
+            return None
+        return transform.to_payload()
 
     def _write_view(
         self,

@@ -5,6 +5,11 @@ Reads ``dataset_manifest.json`` files written by
 (multi-BS) and schema v2 (single-BS) layouts and exposes them as frozen
 dataclasses with absolute artifact paths.
 
+Newer manifests may also carry optional metadata sections (``provenance``,
+``config.tx_power_dbm``, ``config.channel_gain_reference``,
+``camera_model.image_axes`` and ``scene_transform``); all of them read as
+``None`` for old datasets.
+
 NumPy is the only third-party dependency: this module must stay importable
 without Sionna, Mitsuba, Dr.Jit or Matplotlib (see
 ``tests/test_rf_camera_boundaries.py``).
@@ -22,8 +27,10 @@ from typing import Any
 import numpy as np
 
 from plateau_rt.domain.rf_camera.camera import HEMISPHERES
+from plateau_rt.domain.scene_transform import SceneTransform
 
 MANIFEST_FILE_NAME = "dataset_manifest.json"
+BUILD_MANIFEST_FILE_NAME = "manifest.json"
 SUPPORTED_SCHEMA_VERSIONS: tuple[int, ...] = (2, 3)
 APERTURE_CFR_AXIS_ORDER: tuple[str, ...] = ("bs", "hemisphere", "row", "col", "frequency_offset")
 V2_APERTURE_CFR_AXIS_ORDER: tuple[str, ...] = ("hemisphere", "row", "col", "frequency_offset")
@@ -247,6 +254,11 @@ class RFDatasetManifest:
     camera_model_path: Path
     path_geometry_gt: PathGeometryGT | None
     raw: Mapping[str, Any]
+    provenance: Mapping[str, Any] | None = None
+    tx_power_dbm: float | None = None
+    channel_gain_reference: Mapping[str, Any] | None = None
+    image_axes: Mapping[str, Any] | None = None
+    scene_transform: SceneTransform | None = None
 
     @property
     def num_views(self) -> int:
@@ -657,6 +669,57 @@ def _parse_view_v2(value: Any, *, index: int, root: Path) -> DatasetView:
     )
 
 
+def parse_scene_transform(data: Mapping[str, Any]) -> SceneTransform | None:
+    """Return the scene transform described by a build or dataset manifest mapping.
+
+    Prefers the ``scene_transform`` payload; falls back to the deprecated
+    ``center_lat_lon`` alias (a legacy transform with unknown z). Returns None
+    when neither key is present. Raises ManifestError when a present section
+    is malformed.
+    """
+    if not isinstance(data, Mapping):
+        raise ManifestError(f"manifest must be a JSON object, got {type(data).__name__}")
+    raw_transform = data.get("scene_transform")
+    if raw_transform is not None:
+        if not isinstance(raw_transform, Mapping):
+            raise ManifestError(f"'scene_transform' must be a mapping, got {raw_transform!r}")
+        try:
+            return SceneTransform.from_payload(raw_transform)
+        except ValueError as exc:
+            raise ManifestError(f"invalid 'scene_transform': {exc}") from exc
+    raw_center = data.get("center_lat_lon")
+    if raw_center is not None:
+        try:
+            return SceneTransform.from_legacy_center(raw_center)
+        except ValueError as exc:
+            raise ManifestError(f"invalid 'center_lat_lon': {exc}") from exc
+    return None
+
+
+def load_scene_transform(path: Path | str) -> SceneTransform | None:
+    """Load the scene transform from a build directory or a build manifest file.
+
+    Raises ManifestError when the file is missing, unreadable, is not valid
+    JSON or is not a JSON object (as well as for a malformed transform
+    section); returns None when the manifest carries no transform keys.
+    """
+    location = Path(path)
+    manifest_path = location / BUILD_MANIFEST_FILE_NAME if location.is_dir() else location
+    try:
+        text = manifest_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ManifestError(
+            f"build manifest could not be read from {manifest_path}: {exc}"
+        ) from exc
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ManifestError(f"build manifest {manifest_path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, Mapping):
+        raise ManifestError(f"build manifest {manifest_path} must be a JSON object")
+    return parse_scene_transform(data)
+
+
 def parse_rf_dataset_manifest(
     data: Mapping[str, Any], *, root: Path, manifest_path: Path | None = None
 ) -> RFDatasetManifest:
@@ -811,6 +874,42 @@ def parse_rf_dataset_manifest(
     if "placement" in data and not isinstance(data["placement"], Mapping):
         raise ManifestError(f"'placement' must be a mapping, got {data['placement']!r}")
 
+    provenance_raw = data.get("provenance")
+    if provenance_raw is None:
+        provenance: Mapping[str, Any] | None = None
+    elif not isinstance(provenance_raw, Mapping):
+        raise ManifestError(f"'provenance' must be a mapping, got {provenance_raw!r}")
+    else:
+        provenance = dict(provenance_raw)
+
+    tx_power_dbm = _require_optional_float(
+        config.get("tx_power_dbm"), name="'config' key 'tx_power_dbm'"
+    )
+
+    channel_gain_raw = config.get("channel_gain_reference")
+    if channel_gain_raw is None:
+        channel_gain_reference: Mapping[str, Any] | None = None
+    elif not isinstance(channel_gain_raw, Mapping):
+        raise ManifestError(
+            f"'config' key 'channel_gain_reference' must be a mapping, got {channel_gain_raw!r}"
+        )
+    else:
+        channel_gain_reference = dict(channel_gain_raw)
+
+    image_axes: Mapping[str, Any] | None = None
+    if isinstance(camera_model, Mapping):
+        image_axes_raw = camera_model.get("image_axes")
+        if image_axes_raw is None:
+            image_axes = None
+        elif not isinstance(image_axes_raw, Mapping):
+            raise ManifestError(
+                f"'camera_model' key 'image_axes' must be a mapping, got {image_axes_raw!r}"
+            )
+        else:
+            image_axes = dict(image_axes_raw)
+
+    scene_transform = parse_scene_transform(data)
+
     return RFDatasetManifest(
         root=root,
         manifest_path=manifest_path,
@@ -832,6 +931,11 @@ def parse_rf_dataset_manifest(
         camera_model_path=camera_model_path,
         path_geometry_gt=path_geometry_gt,
         raw=data,
+        provenance=provenance,
+        tx_power_dbm=tx_power_dbm,
+        channel_gain_reference=channel_gain_reference,
+        image_axes=image_axes,
+        scene_transform=scene_transform,
     )
 
 

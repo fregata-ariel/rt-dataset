@@ -1,6 +1,10 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from enum import Enum
 from typing import List, Tuple
+
+from plateau_rt.domain.scene_transform import SceneTransform
 
 
 class SurfaceType(Enum):
@@ -47,4 +51,4 @@ class Scene:
 
     scene_id: str
     buildings: List[Building]
-    center_lat_lon: Tuple[float, float]  # ローカル座標の原点となる緯度経度
+    transform: SceneTransform

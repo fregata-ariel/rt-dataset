@@ -8,6 +8,8 @@ import plateau_rt.domain.rf_tomography as rf_tomography
 # RF-camera math and directory post-processing must stay usable without a
 # Sionna/Mitsuba scene (CPU-only analysis, lightweight unit tests).
 SIONNA_FREE_MODULES = [
+    "plateau_rt.domain.scene_transform",
+    "plateau_rt.application.provenance",
     "plateau_rt.domain.rf_camera.imaging",
     "plateau_rt.domain.rf_camera.calibration",
     "plateau_rt.domain.rf_camera.delay",

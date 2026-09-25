@@ -6,6 +6,7 @@ from pathlib import Path
 from plateau_rt.adapters.geometry.trimesh_adapter import TrimeshAdapter
 from plateau_rt.adapters.plateau.cityjson_parser import CityJSONAdapter
 from plateau_rt.adapters.sionna.scene_compiler import SionnaSceneCompiler
+from plateau_rt.application.provenance import collect_provenance
 from plateau_rt.domain.ground import GROUND_PLANE_Z_M, GROUND_VALID_CARRIER_RANGE_HZ
 from plateau_rt.domain.models import MaterialType, Scene
 
@@ -76,7 +77,9 @@ class SceneBuilder:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "source_file": self.input_file.name,
             "scene_id": scene.scene_id,
-            "center_lat_lon": scene.center_lat_lon,
+            "center_lat_lon": list(scene.transform.origin_projected_xyz[:2]),
+            "scene_transform": scene.transform.to_payload(),
+            "provenance": collect_provenance(),
             "outputs": {"xml_file": xml_path.name, "mesh_count": len(mesh_records)},
             # Sionna-RTのシミュレーション層が読み込んで使うマテリアル辞書
             "material_mapping": material_mapping,
