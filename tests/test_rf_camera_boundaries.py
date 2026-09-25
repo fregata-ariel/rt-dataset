@@ -29,6 +29,9 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.experimental.rf_scatterer_fit",
     "plateau_rt.experimental.rf_scatterer_study",
     "plateau_rt.experimental.compare_direct_path",
+    "plateau_rt.viewer",
+    "plateau_rt.viewer.settings",
+    "plateau_rt.viewer.extract",
 ]
 
 
