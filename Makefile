@@ -1,4 +1,4 @@
-.PHONY: build-mock sim-mock render-mock view-mock run-all-mock rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock rf-camera-multiview-mock rf-camera-optical-mock rf-camera-observe-mock rf-camera-partial-mock rf-gs-toy clean build-mock-city rf-camera-multiview-mock-city rf-camera-coverage-mock rf-camera-coverage-mock-city rf-camera-optical-coverage-mock
+.PHONY: build-mock sim-mock render-mock view-mock run-all-mock rf-camera-mock rf-camera-calibrate-mock rf-camera-delay-mock rf-camera-multiview-mock rf-camera-optical-mock rf-camera-observe-mock rf-camera-partial-mock rf-gs-toy clean build-mock-city rf-camera-multiview-mock-city rf-camera-coverage-mock rf-camera-coverage-mock-city rf-camera-optical-coverage-mock rf-tomo-profile-mock-city rf-tomo-profile-full-mock-city
 
 # PYTHONPATHを設定
 PYTHON := PYTHONPATH=./src/ python
@@ -17,6 +17,9 @@ MOCK_CITY_XML  := $(MOCK_CITY_OUT)/mock_city.city.xml
 RF_CAMERA_MULTIVIEW_CITY_OUT := $(MOCK_OUT)/rf_camera_multiview_city/
 RF_CAMERA_COVERAGE_OUT := $(MOCK_OUT)/rf_camera_coverage/
 RF_CAMERA_COVERAGE_CITY_OUT := $(MOCK_OUT)/rf_camera_coverage_city/
+RF_TOMO_OUT := $(MOCK_OUT)/rf_tomo/
+TOMO_VARIANTS ?= refraction specular diffraction
+TOMO_SPLIT_SEED ?= 0
 PLACEMENT_SEED ?= 0
 ORIENTATION_POLICY ?= face_bs
 RADIO_MAP ?=
@@ -95,6 +98,21 @@ rf-camera-coverage-mock-city: build-mock-city
 
 rf-camera-optical-coverage-mock:
 	$(PYTHON) -m plateau_rt.cli.main rf-camera-optical $(RF_CAMERA_COVERAGE_OUT)
+
+rf-tomo-profile-mock-city: build-mock-city
+	$(PYTHON) -m plateau_rt.cli.main rf-tomo-dataset $(MOCK_CITY_XML) $(RF_TOMO_OUT)/ci/refraction \
+		--profile ci --variant refraction --split-seed $(TOMO_SPLIT_SEED)
+
+rf-tomo-profile-full-mock-city: build-mock-city
+	@set -e; first=""; for variant in $(TOMO_VARIANTS); do \
+		out="$(RF_TOMO_OUT)/full_seed$(PLACEMENT_SEED)/$$variant"; \
+		if [ -z "$$first" ]; then reuse=""; first="$$out"; \
+		else reuse="--radio-map $$first/placement/radio_map.json"; fi; \
+		echo "rf-tomo-dataset full $$variant -> $$out"; \
+		$(PYTHON) -m plateau_rt.cli.main rf-tomo-dataset $(MOCK_CITY_XML) "$$out" \
+			--profile full --variant "$$variant" --placement-seed $(PLACEMENT_SEED) \
+			--split-seed $(TOMO_SPLIT_SEED) $$reuse; \
+	done
 
 clean:
 	rm -rf data/intermediate/* data/generated/*

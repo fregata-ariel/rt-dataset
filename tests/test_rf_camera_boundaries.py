@@ -30,6 +30,7 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.application.rf_dataset_manifest",
     "plateau_rt.application.ue_placement",
     "plateau_rt.application.rf_tomography_io",
+    "plateau_rt.application.rf_tomography_profile",
     "plateau_rt.application.rf_tomography_benchmark",
     "plateau_rt.application.rf_tomography_gt",
     "plateau_rt.application.optical_reference",

@@ -2,6 +2,7 @@
 
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -151,3 +152,88 @@ def test_tx_power_dbm_default_and_validation():
         with pytest.raises(ValueError):
             RFMultiViewConfig(tx_power_dbm=bad).validate()
     assert "tx_power_dbm" in asdict(RFMultiViewConfig())
+
+
+def test_mechanism_and_los_free_defaults_and_validation():
+    """Mechanism flags default to (True, True, False, False) and reject non-bools."""
+    config = RFMultiViewConfig()
+    assert (config.specular_reflection, config.refraction, config.diffraction) == (
+        True,
+        True,
+        False,
+    )
+    assert config.los_free_trace is False
+    assert {"specular_reflection", "refraction", "diffraction", "los_free_trace"} <= set(
+        asdict(config)
+    )
+    config.validate()
+    bad_kwargs: list[dict[str, Any]] = [
+        {"specular_reflection": 1},
+        {"refraction": 1},
+        {"diffraction": 0},
+        {"los_free_trace": "yes"},
+    ]
+    for kwargs in bad_kwargs:
+        with pytest.raises(ValueError):
+            RFMultiViewConfig(**kwargs).validate()
+
+
+def test_write_view_with_placement_and_los_free(tmp_path):
+    ds, view, valid_mask, freqs = _make_dataset(tmp_path)
+    aperture = (
+        np.arange(2 * 2 * 4 * 4 * 8, dtype=np.float64).reshape(2, 2, 4, 4, 8)
+        + 1j * np.ones((2, 2, 4, 4, 8))
+    ).astype(np.complex64)
+    placement = {"bank_index": 0, "source": "ring"}
+    entry = ds._write_view(
+        tmp_path,
+        view,
+        aperture,
+        base_stations=[("bs_000", (-10.0, 0.0, 1.5), (0.0, 0.0, 0.0))],
+        frequency_offsets_hz=freqs,
+        valid_ray_mask=valid_mask,
+        placement=placement,
+        aperture_cfr_los_free=0.5 * aperture,
+    )
+    assert list(entry) == [
+        "view_id",
+        "position_m",
+        "look_at_m",
+        "orientation_rad",
+        "placement",
+        "artifacts",
+        "bs",
+    ]
+    assert entry["placement"] == placement
+    assert list(entry["artifacts"]) == ["pose", "aperture_cfr", "aperture_cfr_los_free"]
+    loaded = np.load(tmp_path / entry["artifacts"]["aperture_cfr_los_free"])
+    assert loaded.dtype == np.complex64
+    assert np.array_equal(loaded, (0.5 * aperture).astype(np.complex64))
+
+    plain = ds._write_view(
+        tmp_path / "plain",
+        view,
+        aperture,
+        base_stations=[("bs_000", (-10.0, 0.0, 1.5), (0.0, 0.0, 0.0))],
+        frequency_offsets_hz=freqs,
+        valid_ray_mask=valid_mask,
+    )
+    assert list(plain) == [
+        "view_id",
+        "position_m",
+        "look_at_m",
+        "orientation_rad",
+        "artifacts",
+        "bs",
+    ]
+    assert list(plain["artifacts"]) == ["pose", "aperture_cfr"]
+    assert not (
+        tmp_path / "plain" / "views" / view.view_id / "rf" / "aperture_cfr_los_free.npy"
+    ).exists()
+
+
+def test_dataset_rejects_mismatched_view_placements(tmp_path):
+    cfg = RFMultiViewConfig(rx_rows=4, rx_cols=4, fft_rows=16, fft_cols=16, num_frequency_bins=8)
+    view = generate_ring_views(target=(0, 0, 0), radius_m=10, ue_height_m=1.5, num_views=1)[0]
+    with pytest.raises(ValueError):
+        RFMultiViewDataset(Path("unused.xml"), views=[view], config=cfg, view_placements=[{}, {}])

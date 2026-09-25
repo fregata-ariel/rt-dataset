@@ -31,6 +31,7 @@ from plateau_rt.domain.rf_camera.paths import (
     PATH_GT_MODE_CANONICAL,
     PATH_SCHEMA_FILE_NAME,
     build_path_schema,
+    synthesize_cfr,
 )
 
 CARRIER_HZ = 3.5e9
@@ -430,3 +431,53 @@ def write_v2_dataset(
     }
     (root / "dataset_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return manifest
+
+
+def add_direct_paths_and_oracle(
+    root: Path, *, nlos: Sequence[tuple[int, int]] = (), seed: int = 0, oracle: bool = True
+) -> None:
+    """Make a ``write_v3_dataset`` dataset self-consistent with a direct-path GT."""
+    root = Path(root)
+    manifest_path = root / "dataset_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    gt_path = root / PATH_GEOMETRY_GT_FILE_NAME
+    with np.load(gt_path, allow_pickle=False) as payload:
+        arrays = {name: np.asarray(payload[name]) for name in payload.files}
+    num_views, num_bs = arrays["valid"].shape[0], arrays["valid"].shape[1]
+    rows, cols = arrays["a_baseband"].shape[3], arrays["a_baseband"].shape[4]
+    shape = (num_views, num_bs, 2, rows, cols, 2)
+    rng = np.random.default_rng(seed)
+    a_baseband = (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)).astype(np.complex64)
+    tau = np.zeros((num_views, num_bs, 2), dtype=np.float32)
+    tau[..., 0] = np.float32(30e-9)
+    tau[..., 1] = np.float32(80e-9)
+    arrays["a_baseband"] = a_baseband
+    arrays["tau"] = tau
+    arrays["valid"] = np.ones((num_views, num_bs, 2), dtype=bool)
+    num_interactions = np.zeros((num_views, num_bs, 2), dtype=np.int32)
+    num_interactions[..., 0] = 0
+    num_interactions[..., 1] = 1
+    for v, b in nlos:
+        num_interactions[int(v), int(b), :] = 1
+    arrays["num_interactions"] = num_interactions
+    np.savez_compressed(gt_path, **arrays)
+    offsets = np.asarray(manifest["frequency_offsets_hz"], dtype=np.float64)
+    for v, entry in enumerate(manifest["views"]):
+        view_id = str(entry["view_id"])
+        aperture = synthesize_cfr(a_baseband[v], tau[v][:, None, None, None, :], offsets).astype(
+            np.complex64
+        )
+        np.save(root / f"views/{view_id}/rf/aperture_cfr.npy", aperture)
+        if oracle:
+            direct = num_interactions[v][:, None, None, None, :] == 0
+            a_free = np.where(direct, 0, a_baseband[v])
+            free = synthesize_cfr(a_free, tau[v][:, None, None, None, :], offsets).astype(
+                np.complex64
+            )
+            np.save(root / f"views/{view_id}/rf/aperture_cfr_los_free.npy", free)
+            entry["artifacts"]["aperture_cfr_los_free"] = (
+                f"views/{view_id}/rf/aperture_cfr_los_free.npy"
+            )
+        for bs_index, bs_entry in enumerate(entry["bs"]):
+            bs_entry["hemisphere_energy"] = _hemisphere_energy(aperture[bs_index])
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

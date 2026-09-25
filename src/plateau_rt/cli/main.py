@@ -6,6 +6,7 @@ from typing import Any
 import click
 
 from plateau_rt.application.build_scene import SceneBuilder
+from plateau_rt.application.rf_tomography_profile import PROFILES
 from plateau_rt.domain.rf_camera.camera import RFViewSpec
 from plateau_rt.domain.rf_camera.placement import (
     AGGREGATIONS,
@@ -13,6 +14,7 @@ from plateau_rt.domain.rf_camera.placement import (
     ORIENTATION_POLICIES,
     THRESHOLD_MODES,
 )
+from plateau_rt.domain.rf_tomography.bank import MECHANISM_VARIANTS
 
 
 @click.group()
@@ -155,6 +157,96 @@ def rf_camera_delay(output_dir: Path, power_floor_db: float):
     develop_angle_delay(output_dir, power_floor_db=power_floor_db)
 
 
+def _obtain_radio_map(
+    *,
+    xml_file: Path,
+    output_dir: Path,
+    config: Any,
+    rm_center: tuple[float, float],
+    rm_size: tuple[float, float],
+    rm_cell_size: tuple[float, float],
+    rm_max_depth: int,
+    rm_samples_per_tx: int,
+    rm_seed: int,
+    radio_map: Path | None,
+    ue_height_m: float,
+) -> tuple[Path, str, str | None]:
+    """Reuse or compute the radio map, and return its metadata path and provenance.
+
+    When ``radio_map`` is given the saved map is reused (the ``rm_*`` options
+    are ignored); otherwise a radio map is computed and saved under
+    ``output_dir/placement/``. Returns ``(metadata_path, radio_map_source,
+    radio_map_origin)``.
+    """
+    from plateau_rt.adapters.sionna.radio_map import (
+        RadioMapSolverSettings,
+        compute_radio_map,
+    )
+    from plateau_rt.application.ue_placement import (
+        check_radio_map_matches,
+        copy_radio_map,
+        load_radio_map,
+        save_radio_map,
+    )
+    from plateau_rt.domain.rf_camera.placement import RadioMapGrid
+
+    base_stations = config.resolve_base_stations()
+    solver = RadioMapSolverSettings(
+        max_depth=rm_max_depth,
+        samples_per_tx=rm_samples_per_tx,
+        seed=rm_seed,
+    )
+    if radio_map is not None:
+        saved = load_radio_map(radio_map)
+        check_radio_map_matches(
+            saved,
+            carrier_frequency_hz=config.carrier_frequency_hz,
+            base_stations=base_stations,
+            ue_height_m=ue_height_m,
+            tx_pattern=config.tx_pattern,
+            polarization=config.polarization,
+        )
+        recorded_scene = str(saved.metadata.get("source_scene", ""))
+        if Path(recorded_scene).resolve() != Path(xml_file).resolve():
+            click.echo(
+                f"warning: the saved radio map was computed on {recorded_scene!r}, "
+                f"not on {str(xml_file)!r}; only carrier, base stations and UE height "
+                "are checked",
+                err=True,
+            )
+        metadata_path = copy_radio_map(saved, output_dir)
+        radio_map_source = "loaded"
+        radio_map_origin: str | None = str(radio_map)
+        click.echo("using the saved radio-map grid/solver settings (--rm-* are ignored)")
+    else:
+        center = (float(rm_center[0]), float(rm_center[1]))
+        grid = RadioMapGrid(
+            center_m=(center[0], center[1], float(ue_height_m)),
+            size_m=(float(rm_size[0]), float(rm_size[1])),
+            cell_size_m=(float(rm_cell_size[0]), float(rm_cell_size[1])),
+        )
+        result = compute_radio_map(xml_file, dataset_config=config, grid=grid, solver=solver)
+        metadata_path = save_radio_map(
+            output_dir,
+            path_gain=result.path_gain,
+            indoor_mask=result.indoor_mask,
+            grid=result.grid,
+            solver=solver.to_dict(),
+            base_stations=[
+                {"bs_id": bs_id, "position_m": list(position), "look_at_m": list(look_at)}
+                for bs_id, position, look_at in base_stations
+            ],
+            carrier_frequency_hz=config.carrier_frequency_hz,
+            source_scene=str(xml_file),
+            los_mask=result.los_mask,
+            tx_pattern=config.tx_pattern,
+            polarization=config.polarization,
+        )
+        radio_map_source = "computed"
+        radio_map_origin = None
+    return metadata_path, radio_map_source, radio_map_origin
+
+
 def _plan_coverage_views(
     *,
     xml_file: Path,
@@ -191,83 +283,36 @@ def _plan_coverage_views(
     map is computed and saved under ``output_dir/placement/``. Both branches
     then reload the saved float32 arrays, so the NumPy placement is identical.
     """
-    from plateau_rt.adapters.sionna.radio_map import (
-        RadioMapSolverSettings,
-        compute_radio_map,
-    )
     from plateau_rt.application.ue_placement import (
         building_exclusion_mask,
-        check_radio_map_matches,
-        copy_radio_map,
         load_radio_map,
         placement_manifest_section,
-        save_radio_map,
     )
     from plateau_rt.domain.rf_camera.placement import (
         CoveragePlacementSettings,
         CoverageThreshold,
-        RadioMapGrid,
         plan_coverage_placement,
     )
 
     base_stations = config.resolve_base_stations()
-    solver = RadioMapSolverSettings(
-        max_depth=rm_max_depth,
-        samples_per_tx=rm_samples_per_tx,
-        seed=rm_seed,
+    center = (
+        (float(target[0]), float(target[1]))
+        if rm_center is None
+        else (float(rm_center[0]), float(rm_center[1]))
     )
-    if radio_map is not None:
-        saved = load_radio_map(radio_map)
-        check_radio_map_matches(
-            saved,
-            carrier_frequency_hz=config.carrier_frequency_hz,
-            base_stations=base_stations,
-            ue_height_m=ue_height_m,
-            tx_pattern=config.tx_pattern,
-            polarization=config.polarization,
-        )
-        recorded_scene = str(saved.metadata.get("source_scene", ""))
-        if Path(recorded_scene).resolve() != Path(xml_file).resolve():
-            click.echo(
-                f"warning: the saved radio map was computed on {recorded_scene!r}, "
-                f"not on {str(xml_file)!r}; only carrier, base stations and UE height "
-                "are checked",
-                err=True,
-            )
-        metadata_path = copy_radio_map(saved, output_dir)
-        radio_map_source = "loaded"
-        radio_map_origin: str | None = str(radio_map)
-        click.echo("using the saved radio-map grid/solver settings (--rm-* are ignored)")
-    else:
-        center = (
-            (float(target[0]), float(target[1]))
-            if rm_center is None
-            else (float(rm_center[0]), float(rm_center[1]))
-        )
-        grid = RadioMapGrid(
-            center_m=(center[0], center[1], float(ue_height_m)),
-            size_m=(float(rm_size[0]), float(rm_size[1])),
-            cell_size_m=(float(rm_cell_size[0]), float(rm_cell_size[1])),
-        )
-        result = compute_radio_map(xml_file, dataset_config=config, grid=grid, solver=solver)
-        metadata_path = save_radio_map(
-            output_dir,
-            path_gain=result.path_gain,
-            indoor_mask=result.indoor_mask,
-            grid=result.grid,
-            solver=solver.to_dict(),
-            base_stations=[
-                {"bs_id": bs_id, "position_m": list(position), "look_at_m": list(look_at)}
-                for bs_id, position, look_at in base_stations
-            ],
-            carrier_frequency_hz=config.carrier_frequency_hz,
-            source_scene=str(xml_file),
-            los_mask=result.los_mask,
-            tx_pattern=config.tx_pattern,
-            polarization=config.polarization,
-        )
-        radio_map_source = "computed"
-        radio_map_origin = None
+    metadata_path, radio_map_source, radio_map_origin = _obtain_radio_map(
+        xml_file=xml_file,
+        output_dir=output_dir,
+        config=config,
+        rm_center=center,
+        rm_size=rm_size,
+        rm_cell_size=rm_cell_size,
+        rm_max_depth=rm_max_depth,
+        rm_samples_per_tx=rm_samples_per_tx,
+        rm_seed=rm_seed,
+        radio_map=radio_map,
+        ue_height_m=ue_height_m,
+    )
 
     saved = load_radio_map(metadata_path)
     settings = CoveragePlacementSettings(
@@ -643,6 +688,177 @@ def rf_camera_multiview(
     except ValueError as exc:
         raise click.ClickException(str(exc)) from None
     RFMultiViewDataset(xml_file, views=views, config=config, placement=section).run(output_dir)
+
+
+@cli.command("rf-tomo-dataset")
+@click.argument("xml_file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("output_dir", type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--profile",
+    "profile_name",
+    type=click.Choice(sorted(PROFILES)),
+    default="ci",
+    show_default=True,
+    help="トモグラフィープロファイル (ci: 8リング視点x2BS, full: 64視点x5BS)",
+)
+@click.option(
+    "--variant",
+    type=click.Choice(list(MECHANISM_VARIANTS)),
+    default="refraction",
+    show_default=True,
+    help="トレースする相互作用バリアント (累積: specular→refraction→diffraction)",
+)
+@click.option(
+    "--placement-seed",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="ポーズバンクの配置seed",
+)
+@click.option(
+    "--split-seed",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="学習/ホールドアウト分割のseed",
+)
+@click.option(
+    "--elevated-height",
+    type=float,
+    multiple=True,
+    default=(),
+    show_default=True,
+    help="追加する高高度リングのUE高さ [m] (半径30m, 複数回指定可)",
+)
+@click.option(
+    "--radio-map",
+    type=click.Path(exists=True, dir_okay=True, file_okay=True, path_type=Path),
+    default=None,
+    help="保存済みラジオマップの再利用 (coverageプロファイルのみ)",
+)
+@click.option(
+    "--los-free/--no-los-free",
+    default=True,
+    show_default=True,
+    help="los=Falseのオラクルトレースを追加するかどうか",
+)
+def rf_tomo_dataset(
+    xml_file: Path,
+    output_dir: Path,
+    profile_name: str,
+    variant: str,
+    placement_seed: int,
+    split_seed: int,
+    elevated_height: tuple[float, ...],
+    radio_map: Path | None,
+    los_free: bool,
+):
+    """トモグラフィー用データセットプロファイルを生成します (#15 T20)。
+
+    固定ポーズバンク (リング+カバレッジ抽選、注視点ジッタ) 上で1バリアントを
+    トレースし、los=Falseオラクルとsplits・雑音基準・ハッシュ入りの
+    `tomography`セクションをマニフェストに追記します。
+    """
+    from plateau_rt.application.rf_tomography_profile import (
+        build_pose_bank,
+        build_tomography_section,
+        write_tomography_section,
+    )
+    from plateau_rt.application.scene_checks import check_scene_carrier_frequency
+
+    profile = PROFILES[profile_name]
+    if elevated_height:
+        try:
+            profile = profile.with_elevated_heights(elevated_height)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from None
+    try:
+        check_scene_carrier_frequency(xml_file, profile.carrier_frequency_hz)
+    except ValueError as err:
+        raise click.BadParameter(str(err), param_hint="--profile") from None
+    if radio_map is not None and profile.coverage is None:
+        raise click.UsageError("--radio-map requires a coverage profile")
+    try:
+        config_kwargs = profile.dataset_config_kwargs(variant, los_free_trace=los_free)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
+
+    from plateau_rt.adapters.sionna.rf_camera_dataset import (
+        RFMultiViewConfig,
+        RFMultiViewDataset,
+    )
+
+    config = RFMultiViewConfig(**config_kwargs)
+    saved = None
+    source = "computed"
+    origin: str | None = None
+    if profile.coverage is not None:
+        from plateau_rt.application.ue_placement import load_radio_map
+
+        cov = profile.coverage
+        target = (float(profile.target[0]), float(profile.target[1]))
+        try:
+            metadata_path, source, origin = _obtain_radio_map(
+                xml_file=xml_file,
+                output_dir=output_dir,
+                config=config,
+                rm_center=target,
+                rm_size=cov.rm_size_m,
+                rm_cell_size=cov.rm_cell_size_m,
+                rm_max_depth=cov.rm_max_depth,
+                rm_samples_per_tx=cov.rm_samples_per_tx,
+                rm_seed=cov.rm_seed,
+                radio_map=radio_map,
+                ue_height_m=cov.ue_height_m,
+            )
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from None
+        saved = load_radio_map(metadata_path)
+    try:
+        bank = build_pose_bank(
+            profile,
+            placement_seed=placement_seed,
+            saved_radio_map=saved,
+            dataset_dir=output_dir,
+            radio_map_source=source,
+            radio_map_origin=origin,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
+    RFMultiViewDataset(
+        xml_file,
+        views=bank.views,
+        config=config,
+        placement=bank.record,
+        view_placements=bank.view_placements,
+    ).run(output_dir)
+    try:
+        section = build_tomography_section(
+            output_dir, profile=profile, variant=variant, split_seed=split_seed
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from None
+    write_tomography_section(output_dir, section)
+
+    sources = section["bank"]["sources"]
+    dropped = len(bank.record["rings"]["dropped"])
+    click.echo(
+        f"bank: ring={sources['ring']} coverage={sources['coverage']} dropped_ring_poses={dropped}"
+    )
+    splits = section["splits"]
+    click.echo(
+        f"views: train={splits['train_views']} held_out={splits['held_out_views']} "
+        f"bs: train={splits['train_bs']} held_out={splits['held_out_bs']}"
+    )
+    los_visible = section["los_visible"]
+    num_los = sum(1 for row in los_visible for value in row if value)
+    total = len(los_visible) * (len(los_visible[0]) if los_visible else 0)
+    noise = section["noise"]
+    click.echo(
+        f"los_visible={num_los}/{total} p_ref={noise['p_ref']:.6g} "
+        f"c_ref={noise['c_ref']} sigma2={noise['sigma2']:.6g} "
+        f"(snr_db={noise['snr_db']:.6g})"
+    )
 
 
 @cli.command("rf-camera-optical")

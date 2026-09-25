@@ -591,6 +591,8 @@ Besides the configuration and frequency grid, `dataset_manifest.json` records
 - `path_schema`: artifact file name (`path_schema.json`) of its single
   canonical schema (array dtypes/shapes/axes/units, mode, ordering and the
   resynthesis formula);
+- the dataset config now also records `specular_reflection`, `refraction`,
+  `diffraction` and `los_free_trace` (tomography dataset profile, see below);
 - per view: pose, `artifacts` (pose and `aperture_cfr`), and a `bs` list with
   one entry per BS (`bs_id`, `bs_direction_local`,
   `bs_in_front_hemisphere` and `hemisphere_energy`, the sum of
@@ -754,6 +756,147 @@ plus world-frame rotation vector) while the data are traced at the true poses,
 and `capture_gt_record` flattens the per-`(view, BS)` ground truth into a
 JSON-safe record. `rf_tomography.sync.make_tracks` builds its observed track
 with these helpers.
+
+## Tomography dataset profile (#15 T20)
+
+A tomography dataset is a normal schema-v3 RF-camera dataset traced on a fixed
+**pose bank**, with N = 128 bins, a fixed BS set, one **mechanism variant** per
+dataset directory, an extra oracle trace with the direct path disabled
+(`los=False`), and a `tomography` manifest section with splits,
+`nested_view_order` seeds, the noise reference (P_ref, σ²), pattern metadata
+and sha256 hashes. Everything after tracing is deterministic NumPy
+post-processing.
+
+```bash
+PYTHONPATH=./src uv run python -m plateau_rt.cli.main rf-tomo-dataset SCENE.xml OUT \
+  --profile full --variant refraction --placement-seed 0 --split-seed 0
+```
+
+or on the rich mock city:
+
+```bash
+make rf-tomo-profile-mock-city            # ci profile, refraction variant
+make rf-tomo-profile-full-mock-city       # full profile, all variants (radio map reused)
+```
+
+The second target computes the radio map with the first variant in
+`TOMO_VARIANTS` and reuses it for the other variants via `--radio-map`, so
+every variant shares the identical pose bank. The outputs go to
+`$(MOCK_OUT)/rf_tomo/ci/refraction/` and
+`$(MOCK_OUT)/rf_tomo/full_seed$(PLACEMENT_SEED)/<variant>/`. Other placement
+seeds (`PLACEMENT_SEED=1 ...`) redraw the coverage part and the look-at jitter
+of the bank; the rings stay the same.
+
+### Presets
+
+| profile | views | BSs | rings | jitter | holdout | order seeds |
+|---|---|---|---|---|---|---|
+| `ci` | 8 ring views | 2 (train: 2, held-out: 0) | 1 × 8 @ (40 m, 1.5 m) | 0° | 0.25, min 2 | (0,) |
+| `full` | 64 (ring + coverage) | 5 (train: 4, held-out: last 1) | 3 × 8 @ (20/30/40 m, 1.5 m), start 22.5° | 15° | 0.25, min 4 | (0, 1, 2, 3, 4) |
+
+`ci` is the 8-ring-view × 2-BS heavy-CI smoke; `full` is the 64-pose bank with
+4 training BSs (nested B ∈ {1, 2, 4}) plus one held-out BS, for evaluation.
+Both use the L2 rich mock city (buildings around the origin, target
+`(0, 0, 8)`, 5 BSs).
+
+### Pose-bank rules
+
+- **Rings** come from `generate_ring_views` per `(radius_m, height_m)` pair.
+  A ring pose is dropped for the first reason that applies: `too_close_to_bs`
+  (3-D distance to any BS below `min_bs_distance_m`, 10 m), `outside_grid`
+  (outside the radio-map grid) or `excluded` (inside the dilated building
+  mask); the drops are recorded in `placement.rings.dropped`.
+- **Coverage fill** draws the remaining poses (`num_poses` minus kept rings)
+  from the radio-map candidates with `look_at_target` orientation, zero
+  intra-cell jitter and a ring exclusion radius (`min_ue_spacing_m`, 5 m)
+  around every kept ring pose, recorded as
+  `placement.coverage.exclusion.ring_exclusion_radius_m`.
+- **Look-at jitter** perturbs the direction to the target uniformly in
+  `[-max_deg, max_deg]` on azimuth and elevation (seeded by
+  `SeedSequence([placement_seed, JITTER_STREAM_TAG])`); the orientation is
+  consistent with the recorded look-at by construction.
+- `--elevated-height H` (repeatable) appends one 30 m ring at each height.
+  Elevated UEs are the design's open question Q2: implemented, default off.
+
+### Mechanism variants and the oracle trace
+
+Variants are cumulative: `specular` (specular reflection only), `refraction`
+(+ refraction) and `diffraction` (+ diffraction). The LoS is always traced in
+the main trace. A diffuse (S = 0.3) variant is not offered because `Paths.cfr`
+of the full bank exceeds Dr.Jit's 2^32-entry array limit.
+
+With `--los-free` (default), a second trace with the same mechanism flags,
+`max_depth` and seed but `los=False` stores
+`views/<id>/rf/aperture_cfr_los_free.npy` (the aperture CFR without the direct,
+zero-interaction paths, up to GPU tracing noise) per view.
+
+### Manifest records
+
+- `placement` uses `method: tomography_bank` (`bank_version: 1`): the profile,
+  target, view counts and ring/coverage sources, the requested/kept/dropped
+  rings, the coverage record (with renamed bank view ids) and the jitter
+  description. Each `views[].placement` carries the bank index, the ring or
+  coverage source fields and the look-at jitter.
+- The `tomography` section keys, in order: `schema`, `profile`, `variant`,
+  `mechanism` (variant flags plus `max_depth`, `synthetic_array`, `seed`),
+  `seeds` (placement, split and order seeds), `bank` (view counts, ids,
+  sources), `splits` (train/held-out views and BSs, BS subsets, view subset
+  sizes, nested view orders, gauge references), `los_visible` and
+  `los_visible_source`, `noise`, `antenna` (Tx/Rx patterns and polarizations,
+  the BS look-at orientation rule and per-BS rotations), `oracle_los_free`
+  (or null), `hashes` (sha256 of every aperture file, the oracle files, the
+  path GT, the path schema and the camera model).
+
+P_ref is the `sync.capture_power` (hemisphere powers summed, mean over row,
+col, bin) of the lower-median-power LoS-visible training capture
+(`sync.reference_power`), falling back to the training captures when no
+training capture is LoS-visible; σ² = P_ref / 10^(SNR/10) with one absolute
+σ² per dataset.
+
+### Reproducibility and heavy CI
+
+`replan_pose_bank(dataset_dir)` rebuilds the bank from the saved radio map and
+the recorded seeds ("saved map + seeds → identical bank"); `--radio-map`
+reuse across variants keeps the identical pose bank. Heavy CI Step 10 traces
+the `ci` profile on the rich mock city and runs
+`scripts/ci/check_tomography_profile.py`, which recomputes the section, the
+bank and the oracle residual (`Y - Y_free` against the direct paths
+resynthesised from the path GT, per-variant `--oracle-rtol`).
+
+### Measured on the rich mock city (GPU, RTX 2080 Ti)
+
+One run per profile. GPU tracing is not bit-reproducible, so a rerun differs
+slightly in the traced values (the bank, splits and seeds do not change).
+
+| dataset | wall time | size | LoS-visible captures | P_ref, c_ref | oracle residual (tolerance) |
+|---|---|---|---|---|---|
+| `ci` / refraction (8 × 2) | 12 s (incl. scene build) | 12 MB | 11 / 16 | 3.35e-8, (1, 1) | 9.3e-7 (1e-4) |
+| `full` / refraction (64 × 5) | 4 min 31 s for the three variants | 220 MB | 196 / 320 | 2.76e-8, (23, 2) | 9.7e-7 (1e-4) |
+| `full` / specular | | 215 MB | 196 / 320 | 2.76e-8, (23, 2) | 1.9e-9 (1e-4) |
+| `full` / diffraction | | 224 MB | 196 / 320 | 2.69e-8, (22, 3) | 1.0e-2 (3e-2) |
+
+- **Bank (`full`, placement seed 0).** 23 ring poses and 41 coverage poses.
+  One ring pose is dropped: r = 30 m at azimuth 157.5°, 1.7 m from the nw
+  building. The radio map has 11 776 candidate cells, all of them LoS to at
+  least one BS. The coverage poses lie 15.7–81.3 m from the target
+  horizontally (median 54.9 m). The largest look-at jitter is 14.9°.
+- **Splits (split seed 0).** 48 training views and 16 held-out views.
+  Training BSs are `bs_000`–`bs_003`; `bs_004` is held out.
+- **LoS-visible captures per BS** (of 64 views): 29, 44, 44, 38, 41.
+- **Paths (valid, all links).** specular 614 (at most 8 per link), refraction
+  1 896 (22), diffraction 9 734 (68). The longest delay is 716.8 ns
+  (refraction) and 891.8 ns (diffraction), below the 1 280 ns period at N = 128.
+- **Size.** In a `full` dataset the two aperture files take 41 MB each. Most of
+  the rest (about 130 MB) are the per-(view, BS) derived summaries and debug
+  PNGs of the standard writer.
+- **Expected full-CFR SNR at the 30 dB reference, P10 / P50 / P90** (refraction):
+  3.7 / 26.3 / 34.7 dB. The scatter-referenced SNR (from the los-free trace) is
+  0.2 / 11.4 / 26.6 dB.
+- **Oracle.** In the specular and refraction variants, `Y - Y_free` equals the
+  direct paths resynthesised from the path GT to a residual of at most
+  3e-8 of the direct-path power. The diffraction variant's `los=False` retrace
+  also re-samples the diffraction paths, which leaves up to 1 % of the capture
+  power on NLoS captures, hence its looser tolerance.
 
 ## Delay sampling note
 

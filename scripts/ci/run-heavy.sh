@@ -10,6 +10,7 @@
 #   8. 光学レイレンダラーが mock ボックス形状と一致することの確認
 #   9. カバレッジマップUE配置 (#16): 保存ラジオマップ+seed の再現性確認、
 #      LoS/NLoS 割当と幾何 LoS マスク (トレースした LoS パスとの一致)、BS ごとのしきい値 (any)
+#  10. トモグラフィー用データセットプロファイル (#15 T20): rich mock city の ci プロファイル (8 リング視点 x 2 BS, N=128, los=False オラクル) の manifest 検査
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
@@ -67,5 +68,12 @@ gpu_run make MOCK_OUT="${COV}/" RF_CAMERA_COVERAGE_OUT="${COV}/other_seed/" PLAC
 gpu_run python scripts/ci/check_coverage_placement.py "${COV}/rf_camera_coverage" \
   --num-views 8 --num-bs 2 --mock-box \
   --same-seed-rerun "${COV}/rerun_same_seed" --other-seed "${COV}/other_seed"
+
+echo "🧊 Step 10: Tomography dataset profile (#15 T20) on the rich mock city"
+TOMO="${MOCK_OUT}/tomography"
+rm -rf "${TOMO}"
+gpu_run make MOCK_OUT="${TOMO}/" rf-tomo-profile-mock-city
+gpu_run python scripts/ci/check_tomography_profile.py "${TOMO}/rf_tomo/ci/refraction" \
+  --profile ci --num-views 8 --num-bs 2
 
 echo "✅ Heavy CI finished"

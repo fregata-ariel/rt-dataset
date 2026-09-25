@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -126,6 +126,10 @@ class RFMultiViewConfig:
     max_depth: int = 5
     synthetic_array: bool = True
     seed: int = 42
+    specular_reflection: bool = True
+    refraction: bool = True
+    diffraction: bool = False
+    los_free_trace: bool = False
 
     def validate(self) -> None:
         if self.carrier_frequency_hz <= 0.0:
@@ -152,6 +156,9 @@ class RFMultiViewConfig:
             or not math.isfinite(float(self.tx_power_dbm))
         ):
             raise ValueError("tx_power_dbm must be a finite number")
+        for name in ("specular_reflection", "refraction", "diffraction", "los_free_trace"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a bool, got {getattr(self, name)!r}")
 
     def resolve_base_stations(
         self,
@@ -224,6 +231,7 @@ class RFMultiViewDataset:
         config: RFMultiViewConfig | None = None,
         placement: Mapping[str, Any] | None = None,
         provenance: Mapping[str, Any] | None = None,
+        view_placements: Sequence[Mapping[str, Any]] | None = None,
     ):
         if not views:
             raise ValueError("at least one RF view is required")
@@ -235,6 +243,18 @@ class RFMultiViewDataset:
         self.provenance: dict[str, Any] | None = (
             dict(provenance) if provenance is not None else None
         )
+        if view_placements is None:
+            self.view_placements: list[dict[str, Any]] | None = None
+        else:
+            entries = list(view_placements)
+            if len(entries) != len(self.views):
+                raise ValueError(
+                    f"view_placements has {len(entries)} entries for {len(self.views)} views"
+                )
+            for entry in entries:
+                if not isinstance(entry, Mapping):
+                    raise ValueError(f"view_placements entries must be mappings, got {entry!r}")
+            self.view_placements = [dict(entry) for entry in entries]
 
     def run(self, output_dir: Path) -> Path:
         output_dir = Path(output_dir)
@@ -268,6 +288,9 @@ class RFMultiViewDataset:
             max_depth=cfg.max_depth,
             synthetic_array=cfg.synthetic_array,
             seed=cfg.seed,
+            specular_reflection=cfg.specular_reflection,
+            refraction=cfg.refraction,
+            diffraction=cfg.diffraction,
         )
         frequency_offsets_hz = frequency_offsets(cfg.bandwidth_hz, cfg.num_frequency_bins)
         apertures = multi_tx_aperture_cfrs(
@@ -278,6 +301,27 @@ class RFMultiViewDataset:
             rx_rows=cfg.rx_rows,
             rx_cols=cfg.rx_cols,
         )
+        apertures_los_free: np.ndarray | None = None
+        if cfg.los_free_trace:
+            paths_los_free = trace_paths(
+                scene,
+                max_depth=cfg.max_depth,
+                synthetic_array=cfg.synthetic_array,
+                seed=cfg.seed,
+                specular_reflection=cfg.specular_reflection,
+                refraction=cfg.refraction,
+                diffraction=cfg.diffraction,
+                los=False,
+            )
+            apertures_los_free = multi_tx_aperture_cfrs(
+                paths_los_free,
+                frequency_offsets_hz,
+                num_rx=len(self.views),
+                num_tx=len(base_stations),
+                rx_rows=cfg.rx_rows,
+                rx_cols=cfg.rx_cols,
+            )
+            print("oracle los=False trace complete (aperture_cfr_los_free)")
 
         camera_model = build_direction_cosine_camera_model(
             fft_rows=cfg.fft_rows,
@@ -313,6 +357,7 @@ class RFMultiViewDataset:
 
         manifest_views: list[dict[str, Any]] = []
         for view_index, (view, aperture_cfr) in enumerate(zip(self.views, apertures)):
+            los_free = None if apertures_los_free is None else apertures_los_free[view_index]
             manifest_views.append(
                 self._write_view(
                     output_dir,
@@ -321,6 +366,10 @@ class RFMultiViewDataset:
                     base_stations=base_stations,
                     frequency_offsets_hz=frequency_offsets_hz,
                     valid_ray_mask=camera_model["valid_mask"],
+                    placement=(
+                        None if self.view_placements is None else self.view_placements[view_index]
+                    ),
+                    aperture_cfr_los_free=los_free,
                 )
             )
             print(
@@ -363,6 +412,11 @@ class RFMultiViewDataset:
                     "polarized isotropic element; front + back equals the isotropic "
                     "element. A finite front-to-back ratio g can be synthesized as "
                     "front + g * back."
+                ),
+                **(
+                    {"oracle_los_free_artifact": "aperture_cfr_los_free"}
+                    if cfg.los_free_trace
+                    else {}
                 ),
             },
             "camera_model": {
@@ -438,6 +492,8 @@ class RFMultiViewDataset:
         base_stations: list[tuple[str, tuple[float, float, float], tuple[float, float, float]]],
         frequency_offsets_hz: np.ndarray,
         valid_ray_mask: np.ndarray,
+        placement: Mapping[str, Any] | None = None,
+        aperture_cfr_los_free: np.ndarray | None = None,
     ) -> dict[str, Any]:
         """Save one view's pose, canonical aperture CFR and per-BS summaries.
 
@@ -456,6 +512,14 @@ class RFMultiViewDataset:
             encoding="utf-8",
         )
         np.save(aperture_path, aperture_cfr.astype(np.complex64, copy=False))
+        artifacts: dict[str, str] = {
+            "pose": str(pose_path.relative_to(output_dir)),
+            "aperture_cfr": str(aperture_path.relative_to(output_dir)),
+        }
+        if aperture_cfr_los_free is not None:
+            los_free_path = rf_dir / "aperture_cfr_los_free.npy"
+            np.save(los_free_path, np.asarray(aperture_cfr_los_free).astype(np.complex64))
+            artifacts["aperture_cfr_los_free"] = str(los_free_path.relative_to(output_dir))
 
         bs_entries = []
         for bs_index, (bs_id, bs_position, _look_at) in enumerate(base_stations):
@@ -475,10 +539,8 @@ class RFMultiViewDataset:
             "position_m": list(view.position),
             "look_at_m": list(view.look_at),
             "orientation_rad": list(view.orientation),
-            "artifacts": {
-                "pose": str(pose_path.relative_to(output_dir)),
-                "aperture_cfr": str(aperture_path.relative_to(output_dir)),
-            },
+            **({"placement": dict(placement)} if placement is not None else {}),
+            "artifacts": artifacts,
             "bs": bs_entries,
         }
 

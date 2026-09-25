@@ -276,6 +276,11 @@ class RFDatasetManifest:
         return self.raw.get("placement")
 
     @property
+    def tomography(self) -> Mapping[str, Any] | None:
+        """The raw ``tomography`` section (tomography dataset profile, #15 T20), or None."""
+        return self.raw.get("tomography")
+
+    @property
     def view_ids(self) -> tuple[str, ...]:
         """View ids in manifest order."""
         return tuple(view.view_id for view in self.views)
