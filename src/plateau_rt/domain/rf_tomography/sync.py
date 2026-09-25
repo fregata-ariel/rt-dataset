@@ -30,7 +30,11 @@ Tracks
 ------
 From one clean array six paired tracks share the same noise realisation:
 ``ideal-S``, ``ideal-N``, ``observed-S``, ``observed-N``, ``N-sep`` and
-``S_tau``. N-type tracks are the S track times the unit-modulus gauge.
+``S_tau``. N-type tracks are the S track times the unit-modulus gauge. The
+observed track is built by :func:`impairments.apply_hardware_impairments` with
+the calibration residual of :func:`impairments.calibration_capture`, and the
+gauge helpers ``apply_gauge``/``gauge_factor`` live in
+:mod:`plateau_rt.domain.rf_camera.impairments` (re-exported here).
 """
 
 from __future__ import annotations
@@ -42,7 +46,10 @@ from typing import Any
 
 import numpy as np
 
+from plateau_rt.domain.rf_camera import impairments
 from plateau_rt.domain.rf_camera.imaging import uniform_frequency_spacing
+from plateau_rt.domain.rf_camera.impairments import apply_gauge as apply_gauge
+from plateau_rt.domain.rf_camera.impairments import gauge_factor as gauge_factor
 
 GAUGE_MODES: tuple[str, ...] = ("S", "N", "S_tau", "N_sep")
 MODE_ALIASES: dict[str, str] = {"S_τ": "S_tau", "N-sep": "N_sep"}
@@ -94,40 +101,6 @@ class TrackSeeds:
                 raise ValueError(f"{label} must be an int >= 0")
             if int(value) < 0:
                 raise ValueError(f"{label} must be an int >= 0")
-
-
-def gauge_factor(phi: np.ndarray, tau: np.ndarray, freq_offsets: np.ndarray) -> np.ndarray:
-    """Return the unit-modulus gauge ``[*S, N]`` for per-capture ``phi``/``tau``."""
-    phi_arr = np.asarray(phi, dtype=np.float64)
-    tau_arr = np.asarray(tau, dtype=np.float64)
-    freq = np.asarray(freq_offsets, dtype=np.float64)
-    if phi_arr.shape != tau_arr.shape:
-        raise ValueError("phi and tau must have identical shapes")
-    if freq.ndim != 1:
-        raise ValueError("freq_offsets must be one-dimensional")
-    if not np.all(np.isfinite(phi_arr)) or not np.all(np.isfinite(tau_arr)):
-        raise ValueError("phi and tau must be finite")
-    if not np.all(np.isfinite(freq)):
-        raise ValueError("freq_offsets must be finite")
-    return np.exp(1j * phi_arr[..., None]) * np.exp(-2j * np.pi * freq * tau_arr[..., None])
-
-
-def apply_gauge(
-    Y: np.ndarray, phi: np.ndarray, tau: np.ndarray, freq_offsets: np.ndarray
-) -> np.ndarray:
-    """Return ``Y`` multiplied by the per-capture gauge factor."""
-    arr = np.asarray(Y, dtype=np.complex128)
-    if arr.ndim != 6:
-        raise ValueError("Y must have shape [V, B, H, R, C, N]")
-    phi_arr = np.asarray(phi, dtype=np.float64)
-    tau_arr = np.asarray(tau, dtype=np.float64)
-    if phi_arr.shape != tau_arr.shape or phi_arr.shape != arr.shape[:2]:
-        raise ValueError("phi and tau must have shape [V, B]")
-    freq = np.asarray(freq_offsets, dtype=np.float64)
-    if freq.shape != (arr.shape[-1],):
-        raise ValueError("len(freq_offsets) must equal Y.shape[-1]")
-    gauge = gauge_factor(phi_arr, tau_arr, freq)
-    return (arr * gauge[:, :, None, None, None, :]).astype(np.complex128, copy=False)
 
 
 def draw_gauges(
@@ -275,13 +248,9 @@ def make_tracks(
     if isinstance(sigma_t, str) and sigma_t == "uniform":
         period = 1.0 / uniform_frequency_spacing(np.sort(freq))
 
-    cal_snr = float(hardware.calibration_snr_db)
-    sigma_cal2 = 0.0 if math.isinf(cal_snr) else 10.0 ** (-cal_snr / 10.0)
-
     noise = np.zeros((num_views, num_bs, 2, num_rows, num_cols, num_bins), dtype=np.complex128)
-    gain_db_all = np.zeros((num_views, num_rows, num_cols), dtype=np.float64)
-    phase_all = np.zeros((num_views, num_rows, num_cols), dtype=np.float64)
-    w_cal_all = np.zeros((num_views, num_rows, num_cols, num_bins), dtype=np.complex128)
+    gain = np.zeros((num_views, num_rows, num_cols), dtype=np.complex128)
+    gain_est = np.zeros((num_views, num_rows, num_cols), dtype=np.complex128)
     for v in range(num_views):
         for b in range(num_bs):
             rng = np.random.default_rng(
@@ -291,28 +260,30 @@ def make_tracks(
             scale = math.sqrt(sigma2 / 2.0) if sigma2 > 0.0 else 0.0
             noise[v, b] = scale * (z[0] + 1j * z[1])
             if b == 0:
-                gain_db_all[v] = rng.normal(
-                    0.0, float(hardware.element_gain_std_db), size=(num_rows, num_cols)
+                errors = impairments.draw_element_errors(
+                    impairments.ImpairmentConfig(
+                        element_gain_std_db=hardware.element_gain_std_db,
+                        element_phase_std_deg=hardware.element_phase_std_deg,
+                    ),
+                    num_rows,
+                    num_cols,
+                    rng,
                 )
-                phase_all[v] = np.deg2rad(
-                    rng.normal(
-                        0.0, float(hardware.element_phase_std_deg), size=(num_rows, num_cols)
-                    )
+                gain[v] = errors.complex_gain
+                cal = impairments.calibration_capture(
+                    gain[v], hardware.calibration_snr_db, rng, num_bins=num_bins
                 )
-                zc = rng.standard_normal((2, num_rows, num_cols, num_bins))
-                cal_scale = math.sqrt(sigma_cal2 / 2.0) if sigma_cal2 > 0.0 else 0.0
-                w_cal_all[v] = cal_scale * (zc[0] + 1j * zc[1])
+                gain_est[v] = cal.element_gain_est
 
     ideal_s = (clean + noise).astype(np.complex128, copy=False)
 
-    gain = (10.0 ** (gain_db_all / 20.0) * np.exp(1j * phase_all)).astype(np.complex128)
-    y_cal = gain[..., None] * (1.0 + w_cal_all)
-    gain_est = y_cal.mean(axis=-1).astype(np.complex128)
     eps = (gain / gain_est).astype(np.complex128)
-    fb_gain = float(10.0 ** (-float(hardware.front_to_back_db) / 20.0))
-    collapsed = clean[:, :, 0] + fb_gain * clean[:, :, 1]
-    observed_s = (eps[:, None, :, :, None] * (collapsed + noise[:, :, 0]))[:, :, None].astype(
-        np.complex128, copy=False
+    observed_s, hw_gt = impairments.apply_hardware_impairments(
+        clean,
+        element_gain=eps,
+        front_to_back_db=float(hardware.front_to_back_db),
+        noise_var_abs=sigma2,
+        noise=noise[:, :, 0],
     )
 
     ds, realization = int(seeds.dataset_seed), int(seeds.realization)
@@ -348,9 +319,6 @@ def make_tracks(
             scat_power = capture_power(clean - los)
             expected_scat = 10.0 * np.log10(scat_power / sigma2)
             achieved_scat = 10.0 * np.log10(scat_power / noise_power)
-        sig = np.abs(eps[:, None, :, :, None] * collapsed) ** 2
-        noi = np.abs(eps[:, None, :, :, None] * noise[:, :, 0]) ** 2
-        observed_achieved = 10.0 * np.log10(sig.mean(axis=(2, 3, 4)) / noi.mean(axis=(2, 3, 4)))
 
     gt: dict[str, Any] = {
         "sigma2": float(sigma2),
@@ -374,11 +342,11 @@ def make_tracks(
         "achieved_snr_db": achieved.astype(np.float64),
         "expected_scatter_snr_db": expected_scat.astype(np.float64),
         "achieved_scatter_snr_db": achieved_scat.astype(np.float64),
-        "observed_achieved_snr_db": observed_achieved.astype(np.float64),
+        "observed_achieved_snr_db": hw_gt["achieved_snr_db"],
         "element_gain": gain,
         "element_gain_est": gain_est,
         "calibration_residual": eps,
-        "front_to_back_gain": float(fb_gain),
+        "front_to_back_gain": hw_gt["front_to_back_gain"],
     }
     return tracks, gt
 

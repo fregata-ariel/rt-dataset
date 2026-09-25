@@ -8,6 +8,11 @@ import math
 import numpy as np
 import pytest
 
+from plateau_rt.domain.rf_camera.gauge import align_common_phase_and_delay
+from plateau_rt.domain.rf_camera.impairments import (
+    apply_hardware_impairments,
+    calibration_capture,
+)
 from plateau_rt.domain.rf_tomography import observables
 from plateau_rt.domain.rf_tomography.sync import (
     DEFAULT_SIGMA_T,
@@ -537,3 +542,64 @@ def test_module_constants_and_stream_tag() -> None:
     with pytest.raises(ValueError):
         HardwareConfig(calibration_snr_db=-math.inf)
     assert math.isinf(HardwareConfig(calibration_snr_db=math.inf).calibration_snr_db)
+
+
+def test_observed_track_is_the_hardware_chain() -> None:
+    """The observed track equals the array-level hardware chain with its GT."""
+    Y, R, C = _grid()
+    p_ref, _ = reference_power(Y, np.ones((4, 2), dtype=bool))
+    tracks, gt = make_tracks(Y, 30.0, p_ref, TrackSeeds(31, 0), freq_offsets=FREQ)
+    noise = tracks["ideal-S"][:, :, 0] - Y[:, :, 0]
+    obs, hw = apply_hardware_impairments(
+        Y,
+        element_gain=gt["calibration_residual"],
+        front_to_back_db=20.0,
+        noise_var_abs=gt["sigma2"],
+        noise=noise,
+    )
+    np.testing.assert_allclose(
+        tracks["observed-S"], obs, rtol=1e-12, atol=1e-14 * math.sqrt(gt["sigma2"])
+    )
+    np.testing.assert_allclose(gt["observed_achieved_snr_db"], hw["achieved_snr_db"], rtol=1e-9)
+    assert gt["front_to_back_gain"] == hw["front_to_back_gain"]
+
+    for v in (0, 3):
+        rng_v = np.random.default_rng(np.random.SeedSequence([31, v, 0, 0]))
+        rng_v.standard_normal((2, 2, R, C, N))
+        rng_v.normal(0.0, 0.5, size=(R, C))
+        rng_v.normal(0.0, 5.0, size=(R, C))
+        want = calibration_capture(gt["element_gain"][v], 30.0, rng_v, num_bins=N).element_gain_est
+        np.testing.assert_array_equal(gt["element_gain_est"][v], want)
+
+
+def test_observed_n_gauges_recovered_by_alignment() -> None:
+    """#5: observed-N gauges are recovered by phase/delay alignment."""
+    V, B, R, C = 4, 2, 8, 8
+    for seed in (0, 1, 2):
+        rng = np.random.default_rng(np.random.SeedSequence(seed))
+        tau_p = rng.uniform(50e-9, 400e-9, (V, B, 5))
+        a = rng.standard_normal((V, B, 2, R, C, 5)) + 1j * rng.standard_normal((V, B, 2, R, C, 5))
+        ramp = np.exp(-2j * np.pi * FREQ[None, None, None, :] * tau_p[..., None])
+        Y = np.einsum("vbhrck,vbkn->vbhrcn", a, ramp)
+        p_ref, _ = reference_power(Y, np.ones((V, B), dtype=bool))
+        ref = (1, 0)
+        tracks, gt = make_tracks(Y, 30.0, p_ref, TrackSeeds(seed), freq_offsets=FREQ, ref=ref)
+        collapsed = Y[:, :, 0] + gt["front_to_back_gain"] * Y[:, :, 1]
+        phi_g, tau_g = gt["gauges"]["observed-N"]
+        phi_hat = np.zeros((V, B))
+        tau_hat = np.zeros((V, B))
+        for v in range(V):
+            for b in range(B):
+                alignment = align_common_phase_and_delay(
+                    tracks["observed-N"][v, b, 0], collapsed[v, b], FREQ
+                )
+                phi_hat[v, b] = alignment.phase_rad
+                tau_hat[v, b] = alignment.delay_s
+        phi_hat = phi_hat - phi_hat[ref]
+        for v in range(V):
+            for b in range(B):
+                dphase = phi_hat[v, b] - phi_g[v, b]
+                phase_error = abs(math.atan2(math.sin(dphase), math.cos(dphase)))
+                delay_error = abs((tau_hat[v, b] - tau_g[v, b] + PERIOD / 2) % PERIOD - PERIOD / 2)
+                assert phase_error <= math.radians(0.5)
+                assert delay_error <= 0.03e-9

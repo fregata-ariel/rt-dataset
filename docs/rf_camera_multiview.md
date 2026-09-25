@@ -553,6 +553,23 @@ anything else raises `ManifestError` before writing.
 On the mock dataset, run `make rf-camera-multiview-mock` first, then
 `make rf-camera-observe-mock`.
 
+### Array-level helpers for tomography
+
+`impairments.apply_hardware_impairments` applies the same receiver model to a
+dataset `aperture_cfr[V, B, 2, R, C, N]`, gauge-free: it collapses the
+hemispheres, applies the per-view element gain and outputs `[V, B, 1, R, C, N]`
+plus per-`(v, b)` ground truth. Its noise is **input-referred** and
+**absolute**: `noise_var_abs` is a fixed complex variance per element per bin,
+independent of the signal power. The per-capture clock gauge is added
+separately by `apply_gauge` (`Y_obs = exp(+1j*phi) * exp(-2j*pi*f*tau) * Y`,
+sign-matched to `gauge.align_common_phase_and_delay`). `calibration_capture`
+measures a known unit boresight source (gain estimate = mean over bins,
+residual `eps = G / G_hat`), `perturb_poses` reports jittered poses (position
+plus world-frame rotation vector) while the data are traced at the true poses,
+and `capture_gt_record` flattens the per-`(view, BS)` ground truth into a
+JSON-safe record. `rf_tomography.sync.make_tracks` builds its observed track
+with these helpers.
+
 ## Delay sampling note
 
 With bandwidth `B` and `N` frequency bins:
