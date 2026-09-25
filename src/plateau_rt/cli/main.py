@@ -873,5 +873,79 @@ def run_all(input_file: Path, output_dir: Path, num_rx: int, keep_intermediates:
         click.echo(f"  {name}: {path}")
 
 
+@cli.command("rf-tomo-bench")
+@click.option("--dataset", required=True, type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--suite", type=click.Choice(["full", "smoke", "unit"]), default="smoke", show_default=True
+)
+@click.option(
+    "--tracks", multiple=True, type=click.Choice(["ideal-S", "ideal-N", "N-sep", "S_tau"])
+)
+@click.option("--out", required=True, type=click.Path(file_okay=False, path_type=Path))
+@click.option("--configs", multiple=True)
+@click.option("--strategies", multiple=True)
+@click.option("--spaces", multiple=True, type=click.Choice(["bv", "vs"]))
+@click.option("--gt", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
+@click.option("--seed", type=int, default=0, show_default=True)
+@click.option("--grid-center", nargs=3, type=float, default=None)
+@click.option("--grid-half-size", nargs=3, type=float, default=None)
+@click.option("--grid-spacing", type=float, default=None)
+@click.option("--overwrite", is_flag=True, default=False, show_default=True)
+@click.option(
+    "--workers",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help="Chains run in parallel processes; 1 keeps runtime_s uncontended.",
+)
+def rf_tomo_bench(
+    dataset: Path,
+    suite: str,
+    tracks: tuple[str, ...],
+    out: Path,
+    configs: tuple[str, ...],
+    strategies: tuple[str, ...],
+    spaces: tuple[str, ...],
+    gt: Path | None,
+    seed: int,
+    grid_center: tuple[float, float, float] | None,
+    grid_half_size: tuple[float, float, float] | None,
+    grid_spacing: float | None,
+    overwrite: bool,
+    workers: int,
+):
+    """Run the RF tomography baseline benchmark (design §6, §8 T16)."""
+    from plateau_rt.application.rf_dataset_manifest import ManifestError
+    from plateau_rt.application.rf_tomography_benchmark import run_benchmark
+
+    try:
+        run = run_benchmark(
+            dataset,
+            out,
+            suite,
+            tracks=list(tracks) or None,
+            configs=list(configs) or None,
+            strategies=list(strategies) or None,
+            spaces=list(spaces) or None,
+            gt_path=gt,
+            grid_center=grid_center,
+            grid_half_size=grid_half_size,
+            grid_spacing=grid_spacing,
+            dataset_seed=seed,
+            overwrite=overwrite,
+            workers=workers,
+        )
+    except (ValueError, FileExistsError, FileNotFoundError, ManifestError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    counts = {"ok": 0, "n/a": 0, "error": 0}
+    for row in run.rows:
+        counts[str(row["status"])] += 1
+    click.echo(f"results: {run.results_path}")
+    click.echo(f"run manifest: {run.run_manifest_path}")
+    click.echo(
+        f"rows: {len(run.rows)} (ok={counts['ok']} n/a={counts['n/a']} error={counts['error']})"
+    )
+
+
 if __name__ == "__main__":
     cli()

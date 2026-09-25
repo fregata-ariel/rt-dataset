@@ -147,12 +147,23 @@ def write_v3_dataset(
     seed: int = 0,
     views: Sequence[RFViewSpec] | None = None,
     source_scene: str = "mock_scene.xml",
+    bs_positions: Sequence[Sequence[float]] | None = None,
+    bs_look_at: Sequence[float] | None = None,
 ) -> dict[str, Any]:
     """Write a synthetic schema v3 dataset under ``root`` and return its manifest."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     offsets = centred_frequency_offsets(bins)
-    bs_positions = _resolve_bs_positions(num_bs)
+    if bs_positions is None:
+        positions: list[tuple[float, float, float]] = _resolve_bs_positions(num_bs)
+    else:
+        positions = [(float(p[0]), float(p[1]), float(p[2])) for p in bs_positions]
+        num_bs = len(positions)
+    look_at: tuple[float, float, float] = (
+        (float(bs_look_at[0]), float(bs_look_at[1]), float(bs_look_at[2]))
+        if bs_look_at is not None
+        else TARGET_M
+    )
     bs_ids = [f"bs_{index:03d}" for index in range(num_bs)]
     views = _resolve_views(views, num_views)
     num_views = len(views)
@@ -181,7 +192,7 @@ def write_v3_dataset(
         np.save(rf_dir / "aperture_cfr.npy", aperture)
 
         bs_entries: list[dict[str, Any]] = []
-        for bs_index, (bs_id, bs_position) in enumerate(zip(bs_ids, bs_positions)):
+        for bs_index, (bs_id, bs_position) in enumerate(zip(bs_ids, positions)):
             direction, in_front = _bs_geometry(bs_position, view=view)
             artifacts = {
                 "angular_cfr_center": f"views/{view.view_id}/rf/{bs_id}/angular_cfr_center.npy",
@@ -227,8 +238,8 @@ def write_v3_dataset(
             "carrier_frequency_hz": CARRIER_HZ,
             "bandwidth_hz": BANDWIDTH_HZ,
             "num_frequency_bins": bins,
-            "tx_positions": [list(position) for position in bs_positions],
-            "tx_look_at": list(TARGET_M),
+            "tx_positions": [list(position) for position in positions],
+            "tx_look_at": list(look_at),
             "tx_look_ats": None,
             "rx_rows": rows,
             "rx_cols": cols,
@@ -252,9 +263,9 @@ def write_v3_dataset(
                 "bs_id": bs_id,
                 "index": index,
                 "position_m": list(position),
-                "look_at_m": list(TARGET_M),
+                "look_at_m": list(look_at),
             }
-            for index, (bs_id, position) in enumerate(zip(bs_ids, bs_positions))
+            for index, (bs_id, position) in enumerate(zip(bs_ids, positions))
         ],
         "raw_observation": {
             "artifact": "aperture_cfr",
