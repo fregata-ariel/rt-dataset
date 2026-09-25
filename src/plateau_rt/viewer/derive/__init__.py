@@ -1028,6 +1028,6 @@ class EagerOutcome:
 
 
 # One line per deriver module; each module calls register() at import time.
-DERIVER_MODULES: tuple[str, ...] = ()
+DERIVER_MODULES: tuple[str, ...] = ("plateau_rt.viewer.derive.overview",)
 for _module in DERIVER_MODULES:
     importlib.import_module(_module)

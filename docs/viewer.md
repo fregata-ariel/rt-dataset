@@ -193,3 +193,35 @@ segments, NUL bytes and symlinks that leave the root; every path written in stor
 through it. The loaders check file sizes and declared array shapes before reading data, reject object
 dtypes and non-`npy`/`npz` members, and parse XML with DTDs, entities and external references
 forbidden.
+
+### overview
+
+The eager `overview` deriver (`plateau_rt.viewer.derive.overview`, version 1) runs over every
+`rf_dataset` member with no parameters and writes `overview.json`: `member`, `schema_version`,
+`mode`, `source_scene`, `num_views`, `num_bs`, `base_stations` (id, index, `position_m`,
+`look_at_m`), `views` (id, index, `position_m`, `look_at_m`, `orientation_rad`), `frequency`
+(`carrier_frequency_hz`, `bandwidth_hz`, `num_bins`, `bin_spacing_hz`, `delay_resolution_s`,
+`unambiguous_delay_s` with manifest-then-derived fallbacks), `camera_model` (`fft_rows`/`fft_cols`
+from `valid_mask`, `rx_rows`/`rx_cols`, spacings, `hemispheres`), `pairs` (view-major `view_id`,
+`bs_id`, `bs_in_front_hemisphere`, `hemisphere_energy`, `total_energy`, `back_fraction`),
+`contents` (`optical`, `optical_artifacts`, `transforms_json`, `path_gt`, `path_schema`,
+`observations`, `partials`, `scene`, `placement`, `tomography_gt`) and `image_axes`. `image_axes`
+uses the manifest's `camera_model.image_axes` when present, else the `default_m1` fallback
+(`source: "default_m1"`).
+
+## Kind detection and validation
+
+`plateau_rt.viewer.kinds.detect_members` follows `docs/viewer_bundle.md`: with `bundle.json` it
+checks the format version, member ids/kinds/paths, marker manifests, directory collisions, and
+`for`/`source` links (a partial without `source` falls back to its manifest's `source_dataset`
+joined lexically to its member directory); without it exactly one root marker manifest
+(`dataset_manifest.json`, `partial_manifest.json`, `run_manifest.json`) gives the implicit member.
+`validate_member` then checks each kind: `rf_dataset` re-reads the manifest and checks every
+artifact (`camera_model`, per-view `pose`/`aperture_cfr`/`optical_*`, per-BS derivatives and
+`observed.*`, path GT plus schema, optical `transforms.json`) for containment, existence, `.npy`
+headers, `.npz` members, and the aperture CFR shape/dtype; `scene` resolves every
+`scene_file_references` filename; `rf_partial` checks only the manifest envelope
+(`schema_version` 1, `rf_camera_partial_observation` mode). Failures raise
+`BundleValidationError(member_id, message)`, carrying the `ManifestError` text verbatim.
+`tomo_run` is rejected until V3-2 (#71). All paths go through `resolve_inside` and are never
+opened outside the bundle root; unsafe XML `filename` values are errors, not opens.

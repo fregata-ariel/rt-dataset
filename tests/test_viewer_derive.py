@@ -38,11 +38,16 @@ VALID = {"view": "v0", "freq_bin": "3", "threshold_db": "-30", "mode": "mag"}
 
 
 @pytest.fixture(autouse=True)
-def _empty_registry() -> Any:
-    """Leave the global deriver registry empty after every test."""
+def _isolated_registry() -> Any:
+    """Run each test with an empty registry and restore the built-in derivers afterwards."""
+    builtin = registered_derivers()
+    for deriver in builtin:
+        unregister(deriver.spec.name)
     yield
     for deriver in list(registered_derivers()):
         unregister(deriver.spec.name)
+    for deriver in builtin:
+        register(deriver)
 
 
 class ToyDeriver:

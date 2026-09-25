@@ -15,6 +15,7 @@ from viewer_bundle_fixtures import write_fixture_bundle
 from plateau_rt.viewer.derive import (
     DeriverSpec,
     ParamSpec,
+    register,
     registered_derivers,
     unregister,
 )
@@ -29,13 +30,20 @@ from plateau_rt.viewer.testing import (
 
 GOLDEN_PATH = Path(__file__).parent / "viewer_golden" / "derivers.json"
 
+BUILTIN_DERIVERS = registered_derivers()
+
 
 @pytest.fixture(autouse=True)
-def _empty_registry() -> Any:
-    """Leave the global deriver registry empty after every test."""
+def _isolated_registry() -> Any:
+    """Run each test with an empty registry and restore the built-in derivers afterwards."""
+    builtin = registered_derivers()
+    for deriver in builtin:
+        unregister(deriver.spec.name)
     yield
     for deriver in list(registered_derivers()):
         unregister(deriver.spec.name)
+    for deriver in builtin:
+        register(deriver)
 
 
 @pytest.fixture(scope="module")
@@ -139,8 +147,10 @@ def test_registered_derivers_match_golden(
         bundles,
         golden_path=GOLDEN_PATH,
         update=request.config.getoption("--update-viewer-golden"),
+        derivers=BUILTIN_DERIVERS,
     )
-    assert json.loads(GOLDEN_PATH.read_text(encoding="utf-8")) == {}
+    assert set(json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))) == {"overview"}
+    assert "overview" in {d.spec.name for d in BUILTIN_DERIVERS}
 
 
 def test_golden_scene_update_and_mismatch(tmp_path: Path, bundles: dict[str, Path]) -> None:
@@ -221,7 +231,7 @@ def test_bundle_members_fallback(tmp_path: Path) -> None:
     root = tmp_path / "fallback"
     root.mkdir()
     (root / "run_manifest.json").write_text("{}", encoding="utf-8")
-    assert bundle_members(root) == [{"id": "run", "kind": "tomo_run", "path": "."}]
+    assert bundle_members(root) == [{"id": "run", "kind": "tomo_run", "path": ".", "links": {}}]
     empty = tmp_path / "empty"
     empty.mkdir()
     with pytest.raises(ValueError):

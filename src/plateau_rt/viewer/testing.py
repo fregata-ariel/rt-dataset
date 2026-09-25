@@ -22,6 +22,7 @@ from plateau_rt.viewer.derive import (
     registered,
     registered_derivers,
 )
+from plateau_rt.viewer.kinds import detect_members
 from plateau_rt.viewer.settings import ViewerSettings
 from plateau_rt.viewer.store import Store
 
@@ -36,22 +37,7 @@ class GoldenMismatch(AssertionError):
 
 def bundle_members(root: Path) -> list[dict[str, Any]]:
     """Return the members of a bundle root, from ``bundle.json`` or fallback detection."""
-    root = Path(root)
-    bundle_json = root / "bundle.json"
-    if bundle_json.is_file():
-        payload = json.loads(bundle_json.read_text(encoding="utf-8"))
-        return [dict(member) for member in payload["members"]]
-    found: list[dict[str, Any]] = []
-    for file_name, member_id, kind in (
-        ("dataset_manifest.json", "dataset", "rf_dataset"),
-        ("partial_manifest.json", "partial", "rf_partial"),
-        ("run_manifest.json", "run", "tomo_run"),
-    ):
-        if (root / file_name).is_file():
-            found.append({"id": member_id, "kind": kind, "path": "."})
-    if len(found) != 1:
-        raise ValueError(f"cannot determine the members of {root}")
-    return found
+    return [member.to_dict() for member in detect_members(Path(root))]
 
 
 def _matching_member(members: Sequence[Mapping[str, Any]], deriver: Deriver) -> str:

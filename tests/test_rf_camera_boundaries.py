@@ -23,6 +23,7 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.application.rf_camera_develop",
     "plateau_rt.application.rf_camera_observe",
     "plateau_rt.application.rf_dataset_manifest",
+    "plateau_rt.application.scene_files",
     "plateau_rt.application.optical_reference",
     "plateau_rt.application.scene_checks",
     "plateau_rt.application.solver_profile_report",
@@ -35,6 +36,8 @@ SIONNA_FREE_MODULES = [
     "plateau_rt.viewer.store",
     "plateau_rt.viewer.derive",
     "plateau_rt.viewer.safeio",
+    "plateau_rt.viewer.kinds",
+    "plateau_rt.viewer.derive.overview",
     "plateau_rt.viewer.testing",
 ]
 
