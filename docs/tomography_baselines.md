@@ -1,6 +1,6 @@
 # RF tomography baselines: intensity, delay, phase, all hybrids, simultaneous and non-simultaneous capture
 
-Target file: `docs/tomography_baselines.md`. Status: design approved 2026-09-25 (all §9.2 defaults adopted); Phase 0 (T01–T10) is integrated on `dev/m2-tomography`, and Phase 0–1 (T01–T16, T15b) are implemented on `explore/tomography-p1`; the pinned conventions, deviations and measured evidence are in the Phase 0 and Phase 1 implementation notes at the end of §8 Phase 0 and §8 Phase 1. This document merges three independent proposals: a physics and signal-processing design, a hybrid-fusion design, and an evaluation-and-data design. §1.4 records each conflict between them and why it was resolved the way it was. This revision also resolves the critique of the first draft. The main changes are:
+Target file: `docs/tomography_baselines.md`. Status: design approved 2026-09-25 (all §9.2 defaults adopted); Phase 0–1 (T01–T16, T15b) are integrated on `dev/m2-tomography`; the pinned conventions, deviations and measured evidence are in the Phase 0 and Phase 1 implementation notes at the end of §8 Phase 0 and §8 Phase 1. This document merges three independent proposals: a physics and signal-processing design, a hybrid-fusion design, and an evaluation-and-data design. §1.4 records each conflict between them and why it was resolved the way it was. This revision also resolves the critique of the first draft. The main changes are:
 
 - a LoS atom with its phase fixed by the model;
 - a phase-only global gauge;
@@ -119,7 +119,7 @@ For isolated paths, the noise-limited precision is far finer than the resolution
 1. **No beam squint.** The per-element phase ramp is applied at the carrier only, and path-gt-rich resynthesises `H = Σ_p a_baseband · e^{−j2π δf τ_p}` to about 1e-5. The PSFs are exactly separable: c(u,t) = α·AF(u − u_p)·D_N(t − τ_p). There is no single-view range from curvature.
 2. **The BS pattern is not isotropic** (tr38901, V-pol, aimed at the target).
 3. **The regime is sparse and specular.** The rich mock city (BS at (−70, 5, 25), 12 ring views at r = 40 m, UE height 1.5 m) has 57 valid paths in total.
-   - **LoS and ground bounce.** Each ring view has both. The ground bounce arrives at about the negative of the LoS elevation, with 0.7–1.9 m of excess path. The two share a delay cell but are resolved in angle: Δu_z ≈ 0.44 at 110 m and ≈ 1.27 at 30 m, which is 1.8–5 angular cells (only marginal after Taylor broadening at the farthest views). They are unresolved only in the omni column.
+   - **LoS and ground bounce.** Every ring view has a ground bounce, and eight of the twelve have a LoS: buildings block the direct path for `ue_000001`, `ue_000002`, `ue_000010` and `ue_000011` (docs/rf_camera_multiview.md, mock city), whose front energy is 20–40 dB below the unblocked views. Where both exist, the ground bounce arrives at about the negative of the LoS elevation, with 0.7–1.9 m of excess path. The two share a delay cell but are resolved in angle: Δu_z ≈ 0.44 at 110 m and ≈ 1.27 at 30 m, which is 1.8–5 angular cells (only marginal after Taylor broadening at the farthest views). They are unresolved only in the omni column.
    - **Building reflections.** 0–10 per view, at 7.8–134 m excess.
    - **Through-building paths.** Four views also have a path through a building, about 40 dB down (transmission contrast).
    - **Visibility source.** LoS visibility is read per (v, b) from the path GT (`los_visible`, T17) and is never assumed. Coverage-sampled bank poses may lack a LoS.
@@ -831,7 +831,7 @@ Each task touches one or two source files, has explicit I/O and numeric acceptan
 
 #### Phase 0 implementation notes
 
-Phase 0 is implemented on `explore/tomography-p0`. Each task is one module under `rt` (NumPy/SciPy only; `rt/__init__.py` stays docstring-only with no re-exports) plus `tests/test_rf_tomography_<module>.py`. T05 is tests only. Every number below was measured in the ci container on CPU unless stated otherwise. Phase 1 must treat the conventions in this subsection as binding.
+Phase 0 is integrated on `dev/m2-tomography`. Each task is one module under `rt` (NumPy/SciPy only; `rt/__init__.py` stays docstring-only with no re-exports) plus `tests/test_rf_tomography_<module>.py`. T05 is tests only. Every number below was measured in the ci container on CPU unless stated otherwise. Phase 1 must treat the conventions in this subsection as binding.
 
 | Task | Module | Main entry points |
 |---|---|---|
@@ -1013,7 +1013,7 @@ Phase 0 is implemented on `explore/tomography-p0`. Each task is one module under
 
 #### Phase 1 implementation notes
 
-Phase 1 (T11–T16 with T15b) is implemented on `explore/tomography-p1` on top of Phase 0. The E1/E2 solvers live in `rt/solvers/` (NumPy/SciPy only; both `__init__.py` files stay docstring-only), the registry and the identifiability test in `rt`, and the runner in two Sionna-free application modules that are listed in `tests/test_rf_camera_boundaries.py`. Every number below was measured in the ci container on CPU unless stated otherwise. Phase 2 must treat the conventions in this subsection as binding, together with those of the Phase 0 notes.
+Phase 1 (T11–T16 with T15b) is integrated on `dev/m2-tomography` on top of Phase 0. The E1/E2 solvers live in `rt/solvers/` (NumPy/SciPy only; both `__init__.py` files stay docstring-only), the registry and the identifiability test in `rt`, and the runner in two Sionna-free application modules that are listed in `tests/test_rf_camera_boundaries.py`. Every number below was measured in the ci container on CPU unless stated otherwise. Phase 2 must treat the conventions in this subsection as binding, together with those of the Phase 0 notes.
 
 | Task | Module | Main entry points |
 |---|---|---|
