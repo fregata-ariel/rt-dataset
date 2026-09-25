@@ -22,6 +22,16 @@ if TYPE_CHECKING:
 #: Timeout for anything that waits on a derivation.
 DERIVE_TIMEOUT_MS = 30_000
 
+#: Console message pattern for a CSP violation report.
+CSP_CONSOLE_PATTERN = r"Content Security Policy"
+
+#: Init script installing the CSP-violation collector on every navigation.
+CSP_COLLECTOR_JS = """window.__cspViolations = [];
+document.addEventListener("securitypolicyviolation", (e) => {
+  window.__cspViolations.push({directive: e.violatedDirective, blocked: e.blockedURI,
+    source: e.sourceFile, line: e.lineNumber, sample: e.sample});
+});"""
+
 #: Directory for screenshots and other test outputs.
 REPORT_DIR = Path(os.environ.get("VIEWER_E2E_REPORT_DIR", "ci-reports/viewer-e2e"))
 
@@ -65,7 +75,7 @@ def expected() -> dict[str, str]:
 
 @pytest.fixture
 def page(page: Page) -> Iterator[Page]:
-    """Capture console errors and page errors for assert_no_console_errors."""
+    """Capture console errors, page errors and CSP violations for every navigation."""
     errors: list[str] = []
     _console_errors[id(page)] = errors
 
@@ -80,10 +90,17 @@ def page(page: Page) -> Iterator[Page]:
 
     page.on("console", _on_console)
     page.on("pageerror", _on_page_error)
+    page.add_init_script(CSP_COLLECTOR_JS)
     try:
         yield page
     finally:
         _console_errors.pop(id(page), None)
+
+
+def csp_violations(page: Page, settle_ms: int = 300) -> list[dict[str, Any]]:
+    """Wait ``settle_ms`` for late violations and return the collected CSP violations."""
+    page.wait_for_timeout(settle_ms)
+    return page.evaluate("() => window.__cspViolations || []")
 
 
 def _jsonable(state: dict[str, Any]) -> dict[str, Any]:

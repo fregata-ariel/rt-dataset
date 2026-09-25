@@ -363,12 +363,16 @@ to its variable. Byte sizes accept a decimal number with an optional binary suff
 | `VIEWER_DERIVE_TIMEOUT_S` | `120` | Per-derivation timeout, including child start-up. |
 | `VIEWER_DERIVE_MEM_BYTES` | `4 GiB` | Per-derivation `RLIMIT_AS` for the child address space. |
 | `VIEWER_MAX_CONCURRENT_DERIVES` | `2` | Worker threads shared by eager and lazy jobs (lazy first). |
-| `VIEWER_ALLOWED_HOSTS` | `127.0.0.1,localhost` | `Host` allow-list (enforced by V0-9, #44). |
+| `VIEWER_ALLOWED_HOSTS` | `127.0.0.1,localhost` | `Host` allow-list (Starlette `TrustedHostMiddleware`); other hosts answer 400. |
+| `VIEWER_ALLOWED_ORIGINS` | empty | Extra origins accepted in the `Origin` header of state-changing requests (comma-separated `scheme://host[:port]`), e.g. behind a reverse proxy that rewrites `Host`. |
 | `VIEWER_READ_ONLY` | `false` | Reported by `/api/health`; rejecting mutating operations is V1-12 (#59). |
 
 ## HTTP API
 
-All routes are under `/api` except the static hook. Errors always use the envelope below.
+All routes are under `/api` except the static hook. Errors always use the envelope below. Every
+state-changing request (`PUT`, `POST`, `DELETE`, and generally any method other than `GET`/`HEAD`/
+`OPTIONS`) must send `X-Viewer-Request: 1`; a missing header or a foreign `Origin` answers
+403 `forbidden` (see "Security").
 
 | Method | Path | Success | Body / notes |
 |---|---|---|---|
@@ -445,6 +449,65 @@ included).
 | `bad_params` | 400 | Invalid query/name/confirm/Content-Type or `derive.BadParams`. |
 | `derive_failed` | 500 | `derive.DeriveError` from a failing or invalid derivation. |
 | `conflict` | 409 | Retry of a derivation that is already ready or has not failed. |
+| `forbidden` | 403 | Missing `X-Viewer-Request: 1` header or a disallowed cross-origin request. |
+
+## Security
+
+App-wide defences for the untrusted strings the viewer renders (bundle names, manifest strings,
+`ManifestError` messages) and for the state-changing API. Authentication and read-only enforcement
+are out of scope here (V1-12, #59).
+
+### Response headers
+
+Every HTTP response carries:
+
+- `Content-Security-Policy` with the baseline
+  `default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'`.
+  A route that sets its own policy — the raw-file route uses `sandbox` — gets it **appended** to the
+  baseline, never replacing it.
+- `X-Content-Type-Options: nosniff`.
+- `Referrer-Policy: no-referrer`.
+
+The vendored Plotly (`plotly.js-strict-dist-min`) and three.js run under this policy with no extra
+allowances (no `unsafe-eval`, no `worker-src`); `tests/e2e/test_security.py` exercises a real Plotly
+`newPlot`/hover/`toImage` and a three.js `WebGLRenderer`/`OrbitControls`/`DataTexture` and requires
+zero `securitypolicyviolation` events. `style-src 'unsafe-inline'` is required because Plotly
+injects `<style>` elements and sets inline styles. If a future library needs more, add only the
+minimum and write the reason here.
+
+### CSRF
+
+Every state-changing request must send the custom header `X-Viewer-Request: 1`; the frontend
+(`static/js/api.js`) adds it to every request other than `GET`/`HEAD`, in both the `fetch` path and
+the upload `XMLHttpRequest`. This works because a cross-site HTML form and a "simple" cross-site
+request cannot set custom headers; a cross-site `fetch` that sets the header triggers a CORS
+preflight, which the viewer never approves (no CORS middleware, no `Access-Control-Allow-Origin`).
+When an `Origin` header is present it must equal the request `Host` or be listed in
+`VIEWER_ALLOWED_ORIGINS`; `Origin: null` is rejected. Violations answer 403 with the usual envelope
+(`{"error": {"type": "forbidden", ...}}`) before the request body is read, so a rejected upload is
+never staged. Scripts that call the API (`curl`, `api_upload` in `tests/e2e/conftest.py`, and
+`scripts/ci/viewer_smoke.py`) must send `X-Viewer-Request: 1` too.
+
+### Host allow-list (DNS rebinding)
+
+A DNS-rebinding page can reach a localhost service, so `Host` is checked against
+`VIEWER_ALLOWED_HOSTS` with Starlette's `TrustedHostMiddleware`; anything else answers 400. Compose
+sets the default `127.0.0.1,localhost`, and the shared deployment profile (V1-12, #59) must set it
+to its public host name.
+
+### Rules for panel authors
+
+- Build DOM only with `h(tag, attrs, ...children)` from `dom.js`; string children become text nodes.
+- Never use `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, `eval`,
+  `new Function` or `createContextualFragment`.
+- `index.html` must not contain inline `<script>`, `<style` or `on*=` attributes.
+- Data strings passed to Plotly hover text, `hovertemplate`, annotations or titles go through
+  `escapeHtml` from `dom.js` (Plotly renders a subset of HTML there); three.js labels are DOM
+  elements built with `h()`.
+
+`tests/test_viewer_security.py` scans `static/` (except `vendor/`) for the forbidden APIs, and
+`tests/e2e/test_security.py` checks that XSS strings render as text and that no panel triggers a CSP
+violation.
 
 ## Architecture
 
@@ -460,6 +523,7 @@ included).
 | `plateau_rt.viewer.jobs` | Background job manager (`spawn` children, limits, dedup, recovery). |
 | `plateau_rt.viewer.__main__` | Headless `serve`/`ingest`/`derive` command line. |
 | `plateau_rt.viewer.api` | FastAPI app factory, error envelope, bundle, derived and job routes. |
+| `plateau_rt.viewer.api.security` | Security headers (CSP), CSRF check and `Host` allow-list middleware (see "Security"). |
 | `plateau_rt.viewer.api.static_assets` | Build-hashed static snapshot served at `/` and `/static/...` (see "Frontend"). |
 | `plateau_rt.viewer.static` | Frontend assets (V0-6, #41): `index.html`, `css/viewer.css`, `js/` modules, `vendor/`. |
 | `plateau_rt.viewer.testing` | Determinism and golden helpers for tests. |
@@ -595,7 +659,12 @@ recorded `modification`, and refresh `sha256`/`upstream_sha256`.
 The browser smoke tests (`tests/e2e`, run with `scripts/ci/run-viewer-e2e.sh`) drive the
 real frontend in Chromium (Playwright): upload flows including rejected bundles, overview
 values, `npy.js`, hash state round-trip and reload, and one case per panel (`PANEL_CASES`
-in `tests/e2e/test_panels.py`).
+in `tests/e2e/test_panels.py`). `tests/e2e/test_security.py` adds the security baseline:
+the CSP header, XSS bundle names and manifest errors rendered as text, one CSP-violation
+check per panel, and a Plotly/three.js smoke under the strict CSP. The `page` fixture installs
+a CSP-violation collector on every navigation (`csp_violations(page)` returns the collected
+events), and the run writes the `bundle_xss.zip` (a valid bundle whose name is markup) and
+`broken_script_in_message.zip` (a manifest error containing a script payload) fixtures.
 
 `tests/e2e/conftest.py` provides the shared helpers:
 
@@ -605,6 +674,7 @@ in `tests/e2e/test_panels.py`).
 - `open_panel`: open a panel by hash, wait until its derivation finished, and return its root.
 - `wait_panel`: wait until the mounted panel finished loading without an error view.
 - `assert_no_console_errors`: fail on unexpected console errors and page errors.
+- `csp_violations`: wait for late violations and return the collected `securitypolicyviolation` events.
 - `save_screenshot`: save a full-page screenshot to the report dir.
 - `assert_state_roundtrip`: push state through the store, check the hash round-trips,
   reload and check the state persists.

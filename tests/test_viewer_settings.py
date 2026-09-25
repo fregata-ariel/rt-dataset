@@ -39,6 +39,7 @@ def test_defaults() -> None:
     assert settings.data_dir.name == DEFAULT_DATA_DIR
     assert settings.import_roots == ()
     assert settings.allowed_hosts == DEFAULT_ALLOWED_HOSTS == ("127.0.0.1", "localhost")
+    assert settings.allowed_origins == ()
     assert settings.read_only is False
     assert settings.extract_limits == ExtractLimits(100_000, 16 * GiB)
 
@@ -76,18 +77,48 @@ def test_parsing_valid_values(tmp_path: Path) -> None:
     assert settings.read_only is True
 
 
+def test_parsing_allowed_origins() -> None:
+    """VIEWER_ALLOWED_ORIGINS is split, stripped, lower-cased and loses a trailing slash."""
+    settings = ViewerSettings.from_env(
+        {"VIEWER_ALLOWED_ORIGINS": " https://Viewer.Example.org/ , http://127.0.0.1:8765 "}
+    )
+    assert settings.allowed_origins == (
+        "https://viewer.example.org",
+        "http://127.0.0.1:8765",
+    )
+
+
+@pytest.mark.parametrize("value", ["a,,b", "ftp://x", "https://x/path", "x.example", "https://u@x"])
+def test_invalid_allowed_origins(value: str) -> None:
+    """Malformed origin entries are rejected at startup."""
+    with pytest.raises(SettingsError) as info:
+        ViewerSettings.from_env({"VIEWER_ALLOWED_ORIGINS": value})
+    assert "VIEWER_ALLOWED_ORIGINS" in str(info.value)
+
+
+def test_direct_allowed_origins_validates() -> None:
+    """Direct construction validates allowed_origins entries too."""
+    with pytest.raises(SettingsError):
+        ViewerSettings(allowed_origins=("HTTPS://X",))
+    with pytest.raises(SettingsError):
+        ViewerSettings(allowed_origins=("https://x/path",))
+    assert ViewerSettings(allowed_origins=("https://x",)).allowed_origins == ("https://x",)
+
+
 def test_blank_values_use_defaults() -> None:
     settings = ViewerSettings.from_env(
         {
             "VIEWER_DATA": "   ",
             "VIEWER_MAX_FILES": "  ",
             "VIEWER_ALLOWED_HOSTS": "",
+            "VIEWER_ALLOWED_ORIGINS": "   ",
             "VIEWER_READ_ONLY": "\t",
         }
     )
     assert settings.data_dir.name == DEFAULT_DATA_DIR
     assert settings.max_files == DEFAULT_MAX_FILES
     assert settings.allowed_hosts == DEFAULT_ALLOWED_HOSTS
+    assert settings.allowed_origins == ()
     assert settings.read_only is False
 
 

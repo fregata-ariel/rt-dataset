@@ -10,6 +10,8 @@ import warnings
 from pathlib import Path
 from typing import Any
 
+from viewer_client import viewer_client
+
 from plateau_rt.viewer.api import create_app
 from plateau_rt.viewer.api.app import DEFAULT_STATIC_DIR
 from plateau_rt.viewer.settings import ViewerSettings
@@ -48,7 +50,7 @@ def make_app(tmp_path: Path, static_dir: Path, **overrides: Any) -> Any:
 def make_client(tmp_path: Path, static_dir: Path) -> tuple[Any, TestClient]:
     """Build an app and a TestClient serving ``static_dir``."""
     app = make_app(tmp_path, static_dir)
-    return app, TestClient(app)
+    return app, viewer_client(app)
 
 
 def static_files() -> list[str]:
@@ -150,7 +152,7 @@ def test_build_changes_when_a_file_changes(tmp_path: Path) -> None:
     build_a = app_a.state.static_build
     assert BUILD_RE.fullmatch(build_a) is not None
     assert app_a2.state.static_build == build_a
-    client_a = TestClient(app_a)
+    client_a = viewer_client(app_a)
     old_bytes = client_a.get(f"/static/{build_a}/js/strings.js").content
     assert old_bytes == (static / "js" / "strings.js").read_bytes()
 
@@ -159,7 +161,7 @@ def test_build_changes_when_a_file_changes(tmp_path: Path) -> None:
     app_b = make_app(tmp_path / "b", static)
     build_b = app_b.state.static_build
     assert build_b != build_a
-    client_b = TestClient(app_b)
+    client_b = viewer_client(app_b)
     index_b = client_b.get("/")
     assert f"/static/{build_b}/js/app.js" in index_b.text
     new_bytes = client_b.get(f"/static/{build_b}/js/strings.js").content

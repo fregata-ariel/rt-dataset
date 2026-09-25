@@ -34,6 +34,7 @@ ENV_VARS: dict[str, str] = {
     "derive_mem_bytes": "VIEWER_DERIVE_MEM_BYTES",
     "max_concurrent_derives": "VIEWER_MAX_CONCURRENT_DERIVES",
     "allowed_hosts": "VIEWER_ALLOWED_HOSTS",
+    "allowed_origins": "VIEWER_ALLOWED_ORIGINS",
     "read_only": "VIEWER_READ_ONLY",
 }
 
@@ -42,6 +43,7 @@ _UNITS = {"KiB": KiB, "MiB": MiB, "GiB": GiB, "TiB": 1 << 40}
 _TRUE_VALUES = ("1", "true", "yes", "on")
 _FALSE_VALUES = ("0", "false", "no", "off")
 _FORBIDDEN_HOST_CHARS = (" ", "\t", "\n", "\r", "/", ",")
+_ORIGIN_RE = re.compile(r"^https?://[a-z0-9.\-\[\]:]+$")
 
 
 class SettingsError(ValueError):
@@ -62,6 +64,7 @@ class ViewerSettings:
     derive_mem_bytes: int = DEFAULT_DERIVE_MEM_BYTES
     max_concurrent_derives: int = DEFAULT_MAX_CONCURRENT_DERIVES
     allowed_hosts: tuple[str, ...] = DEFAULT_ALLOWED_HOSTS
+    allowed_origins: tuple[str, ...] = ()
     read_only: bool = False
 
     def __post_init__(self) -> None:
@@ -124,6 +127,14 @@ class ViewerSettings:
                 raise SettingsError(
                     f"allowed_hosts ({ENV_VARS['allowed_hosts']}) has an invalid entry {host!r}"
                 )
+        if not isinstance(self.allowed_origins, tuple):
+            raise SettingsError(f"allowed_origins ({ENV_VARS['allowed_origins']}) must be a tuple")
+        for origin in self.allowed_origins:
+            if not isinstance(origin, str) or _ORIGIN_RE.fullmatch(origin) is None:
+                raise SettingsError(
+                    f"allowed_origins ({ENV_VARS['allowed_origins']}) has an invalid entry "
+                    f"{origin!r}"
+                )
         if not isinstance(self.read_only, bool):
             raise SettingsError(
                 f"read_only ({ENV_VARS['read_only']}) must be a bool, got {self.read_only!r}"
@@ -169,6 +180,8 @@ class ViewerSettings:
         kwargs["import_roots"] = () if roots is None else _parse_roots(roots)
         hosts = _value(env, "allowed_hosts")
         kwargs["allowed_hosts"] = DEFAULT_ALLOWED_HOSTS if hosts is None else _parse_hosts(hosts)
+        origins = _value(env, "allowed_origins")
+        kwargs["allowed_origins"] = () if origins is None else _parse_origins(origins)
         read_only = _value(env, "read_only")
         kwargs["read_only"] = False if read_only is None else _parse_bool(read_only)
         return cls(**kwargs)  # type: ignore[arg-type]
@@ -240,6 +253,22 @@ def _parse_hosts(raw: str) -> tuple[str, ...]:
             raise SettingsError(f"allowed_hosts ({ENV_VARS['allowed_hosts']}) has an empty entry")
         hosts.append(host)
     return tuple(hosts)
+
+
+def _parse_origins(raw: str) -> tuple[str, ...]:
+    """Parse a comma-separated origin allow-list, lower-cased with one trailing slash removed."""
+    origins: list[str] = []
+    for item in raw.split(","):
+        origin = item.strip()
+        if not origin:
+            raise SettingsError(
+                f"allowed_origins ({ENV_VARS['allowed_origins']}) has an empty entry"
+            )
+        origin = origin.lower()
+        if origin.endswith("/"):
+            origin = origin[:-1]
+        origins.append(origin)
+    return tuple(origins)
 
 
 def _parse_bool(raw: str) -> bool:

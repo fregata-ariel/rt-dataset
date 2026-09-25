@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 import pytest
 from viewer_bundle_fixtures import BundleFixture, make_archive, write_fixture_bundle
+from viewer_client import viewer_client
 from viewer_job_derivers import (
     MARKS_ENV,
     Boom,
@@ -172,7 +173,7 @@ def test_slow_deriver_202_then_200_and_dedup(
     marks = _marks(tmp_path, monkeypatch)
     app = make_app(tmp_path)
     with registered(SlowDeriver()):
-        with TestClient(app) as client:
+        with viewer_client(app) as client:
             digest = upload(client, zip_bytes).json()["digest"]
             url = f"/api/bundles/{digest}/members/dataset/derived/tslow"
             params = {"ms": "1500", "tag": "1"}
@@ -180,7 +181,9 @@ def test_slow_deriver_202_then_200_and_dedup(
             async def fire() -> list[httpx.Response]:
                 transport = httpx.ASGITransport(app=app)
                 async with httpx.AsyncClient(
-                    transport=transport, base_url="http://testserver"
+                    transport=transport,
+                    base_url="http://127.0.0.1",
+                    headers={"X-Viewer-Request": "1"},
                 ) as async_client:
                     return await asyncio.gather(
                         *[async_client.get(url, params=params) for _ in range(5)]
@@ -224,7 +227,7 @@ def test_timeout_kills_child(
     marks = _marks(tmp_path, monkeypatch)
     app = make_app(tmp_path, derive_timeout_s=3)
     with registered(SlowDeriver()):
-        with TestClient(app) as client:
+        with viewer_client(app) as client:
             digest = upload(client, zip_bytes).json()["digest"]
             url = f"/api/bundles/{digest}/members/dataset/derived/tslow"
             response = client.get(url, params={"ms": "60000", "tag": "2"})
@@ -243,7 +246,7 @@ def test_memory_limit(tmp_path: Path, zip_bytes: bytes) -> None:
     parent_pid = os.getpid()
     app = make_app(tmp_path, derive_mem_bytes=2 * GiB)
     with registered(MemDeriver()):
-        with TestClient(app) as client:
+        with viewer_client(app) as client:
             digest = upload(client, zip_bytes).json()["digest"]
             url = f"/api/bundles/{digest}/members/dataset/derived/tmem"
             ok = client.get(url, params={"mib": "64"})
@@ -271,7 +274,7 @@ def test_concurrency_limit(
     app = make_app(tmp_path, max_concurrent_derives=workers)
     app.state.on_bundle_committed = lambda store, digest: None
     with registered(SlowDeriver()):
-        with TestClient(app) as client:
+        with viewer_client(app) as client:
             digest = upload(client, zip_bytes).json()["digest"]
             url = f"/api/bundles/{digest}/members/dataset/derived/tslow"
             job_ids = []
@@ -302,7 +305,7 @@ def test_lazy_runs_before_eager(
     app = make_app(tmp_path, max_concurrent_derives=1)
     app.state.on_bundle_committed = lambda store, digest: None
     with registered(SlowDeriver(), EagerSlowDeriver()):
-        with TestClient(app) as client:
+        with viewer_client(app) as client:
             digest = upload(client, zip_bytes).json()["digest"]
             base = f"/api/bundles/{digest}/members/dataset/derived"
             jobs: JobManager = app.state.jobs
@@ -327,7 +330,7 @@ def test_retry_flow(tmp_path: Path, zip_bytes: bytes, monkeypatch: pytest.Monkey
     (marks / "flaky-fail").write_text("", encoding="utf-8")
     app = make_app(tmp_path)
     with registered(FlakyDeriver(), EnumDeriver()):
-        with TestClient(app) as client:
+        with viewer_client(app) as client:
             digest = upload(client, zip_bytes).json()["digest"]
             base = f"/api/bundles/{digest}/members/dataset/derived"
             first = client.get(f"{base}/tflaky")
@@ -369,7 +372,7 @@ def test_retry_while_active_conflicts(
     app = make_app(tmp_path)
     app.state.on_bundle_committed = lambda store, digest: None
     with registered(SlowDeriver()):
-        with TestClient(app) as client:
+        with viewer_client(app) as client:
             digest = upload(client, zip_bytes).json()["digest"]
             url = f"/api/bundles/{digest}/members/dataset/derived/tslow"
             params = {"ms": "2000", "tag": "40"}
@@ -412,7 +415,7 @@ def test_restart_recovery(tmp_path: Path, bundle: BundleFixture) -> None:
         params_key="mode=a",
     )
     app = create_app(settings, static_dir=tmp_path / "nostatic")
-    with TestClient(app) as client:
+    with viewer_client(app) as client:
         for job_id in (running_id, queued_id):
             info = client.get(f"/api/jobs/{job_id}").json()
             assert info["status"] == "failed"
@@ -433,7 +436,7 @@ def test_restart_recovery(tmp_path: Path, bundle: BundleFixture) -> None:
         assert overview.status_code == 200
     before = _count_jobs(store)
     second = create_app(settings, static_dir=tmp_path / "nostatic")
-    with TestClient(second):
+    with viewer_client(second):
         assert _count_jobs(store) == before
 
 
@@ -441,7 +444,7 @@ def test_eager_after_upload_and_status(tmp_path: Path, zip_bytes: bytes) -> None
     """Uploads start eager jobs and a failing lazy job shows up in the status failures."""
     app = make_app(tmp_path)
     with registered(Boom()):
-        with TestClient(app) as client:
+        with viewer_client(app) as client:
             digest = upload(client, zip_bytes).json()["digest"]
             deadline = time.monotonic() + 60
             status: dict[str, Any] = {}
@@ -465,7 +468,7 @@ def test_eager_after_upload_and_status(tmp_path: Path, zip_bytes: bytes) -> None
 def test_jobs_404(tmp_path: Path) -> None:
     """Unknown or malformed job ids and unknown bundles answer 404."""
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with viewer_client(app) as client:
         assert client.get(f"/api/jobs/{'0' * 32}").status_code == 404
         assert client.get("/api/jobs/nothex").status_code == 404
         assert client.get(f"/api/bundles/{'0' * 64}/status").status_code == 404
@@ -478,7 +481,7 @@ def test_delete_cancels_jobs(
     marks = _marks(tmp_path, monkeypatch)
     app = make_app(tmp_path)
     with registered(SlowDeriver()):
-        with TestClient(app) as client:
+        with viewer_client(app) as client:
             digest = upload(client, zip_bytes).json()["digest"]
             url = f"/api/bundles/{digest}/members/dataset/derived/tslow"
             response = client.get(url, params={"ms": "60000", "tag": "30"})

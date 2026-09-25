@@ -27,11 +27,13 @@ from viewer_bundle_fixtures import (
     write_broken_dataset,
     write_fixture_bundle,
 )
+from viewer_client import viewer_client
 from viewer_job_derivers import Boom, Versioned
 
 from plateau_rt.application.rf_dataset_manifest import ManifestError
 from plateau_rt.viewer import VIEWER_VERSION
 from plateau_rt.viewer.api import create_app
+from plateau_rt.viewer.api.security import merge_csp
 from plateau_rt.viewer.derive import (
     register,
     registered,
@@ -102,7 +104,7 @@ def make_app(tmp_path: Path, **overrides: Any) -> Any:
 def make_client(tmp_path: Path, **overrides: Any) -> tuple[Any, TestClient]:
     """Build an app and a TestClient for one test."""
     app = make_app(tmp_path, **overrides)
-    return app, TestClient(app)
+    return app, viewer_client(app)
 
 
 def upload(client: TestClient, data: bytes, name: str = "fixture") -> Any:
@@ -137,6 +139,17 @@ def assert_clean(store: Store) -> None:
     assert os.listdir(store.staging_dir) == []
     assert store.list() == []
     assert os.listdir(store.bundles_dir) == []
+
+
+def _asgi_headers(method: str, headers: Sequence[tuple[str, str]]) -> list[tuple[bytes, bytes]]:
+    """Encode raw ASGI headers, adding the allowed Host and the CSRF header for unsafe methods."""
+    encoded = [(key.lower().encode(), value.encode()) for key, value in headers]
+    names = {key for key, _value in encoded}
+    if b"host" not in names:
+        encoded.append((b"host", b"127.0.0.1"))
+    if method.upper() not in ("GET", "HEAD", "OPTIONS") and b"x-viewer-request" not in names:
+        encoded.append((b"x-viewer-request", b"1"))
+    return encoded
 
 
 def _drive_asgi(
@@ -178,9 +191,9 @@ def _drive_asgi(
         "raw_path": path.encode(),
         "query_string": b"",
         "root_path": "",
-        "headers": [(k.lower().encode(), v.encode()) for k, v in headers],
+        "headers": _asgi_headers(method, headers),
         "client": ("127.0.0.1", 1),
-        "server": ("testserver", 80),
+        "server": ("127.0.0.1", 80),
     }
     asyncio.run(asyncio.wait_for(app(scope, receive, send), 30))
     return sent, len(consumed)
@@ -575,7 +588,8 @@ def test_raw_serving_headers_and_bytes(tmp_path: Path, v3_bundle: BundleFixture)
         assert response.headers["content-type"] == "application/octet-stream"
         assert response.headers["x-content-type-options"] == "nosniff"
         assert response.headers["content-disposition"].startswith("attachment")
-        assert response.headers["content-security-policy"] == "sandbox"
+        assert response.headers["content-security-policy"] == merge_csp("sandbox")
+        assert response.headers["content-security-policy"].endswith("; sandbox")
         assert response.headers["cache-control"] == "private, max-age=0"
     manifest = client.get(f"/api/bundles/{digest}/members/dataset/raw/dataset_manifest.json")
     assert manifest.status_code == 200
@@ -826,7 +840,7 @@ def test_static_hook(tmp_path: Path) -> None:
     (static / "index.html").write_bytes(b"<h1>viewer</h1>")
     (static / "app.js").write_bytes(b"console.log(1)")
     app = create_app(_settings(tmp_path), static_dir=static)
-    client = TestClient(app)
+    client = viewer_client(app)
     response = client.get("/")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
@@ -837,7 +851,7 @@ def test_static_hook(tmp_path: Path) -> None:
 def test_no_static(tmp_path: Path) -> None:
     """Without a static directory GET / is plain text and /static is absent."""
     app = create_app(_settings(tmp_path), static_dir=tmp_path / "nostatic")
-    client = TestClient(app)
+    client = viewer_client(app)
     response = client.get("/")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")

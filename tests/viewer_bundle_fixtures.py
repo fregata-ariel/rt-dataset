@@ -84,6 +84,8 @@ MALICIOUS_MEMBER_NAMES: dict[str, str | None] = {
     "too_many_files": None,
     "bomb": "zeros.bin",
 }
+XSS_SCRIPT_PAYLOAD = "<script>window.__xss=1</script><img src=x onerror=window.__xss=2>"
+XSS_BUNDLE_NAME = "<img src=x onerror=window.__xss=1>"
 BROKEN_CASES = (
     "bad_schema_version",
     "missing_artifact",
@@ -91,6 +93,7 @@ BROKEN_CASES = (
     "duplicate_view_id",
     "bad_axis_order",
     "bad_position",
+    "script_in_message",
 )
 BROKEN_CASE_MESSAGES: dict[str, str] = {
     "bad_schema_version": "unsupported 'schema_version'",
@@ -99,6 +102,7 @@ BROKEN_CASE_MESSAGES: dict[str, str] = {
     "duplicate_view_id": "duplicate view_id",
     "bad_axis_order": "'axis_order'",
     "bad_position": "'position_m'",
+    "script_in_message": f"unsupported 'schema_version' {XSS_SCRIPT_PAYLOAD!r}",
 }
 
 _MEMBER_ID_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
@@ -845,6 +849,8 @@ def write_broken_dataset(root: Path, case: str) -> Path:
         )
     elif case == "bad_position":
         manifest["views"][0]["position_m"] = [0.0, 0.0]
+    elif case == "script_in_message":
+        manifest["schema_version"] = XSS_SCRIPT_PAYLOAD
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return root
 

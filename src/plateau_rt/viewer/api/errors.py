@@ -19,6 +19,7 @@ ERROR_TYPES = (
     "bad_params",
     "derive_failed",
     "conflict",
+    "forbidden",
 )
 
 

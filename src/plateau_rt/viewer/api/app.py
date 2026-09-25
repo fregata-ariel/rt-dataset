@@ -14,6 +14,7 @@ from plateau_rt.viewer.api.errors import install_error_handlers
 from plateau_rt.viewer.api.routes_bundles import router as bundles_router
 from plateau_rt.viewer.api.routes_derived import router as derived_router
 from plateau_rt.viewer.api.routes_jobs import router as jobs_router
+from plateau_rt.viewer.api.security import install_security
 from plateau_rt.viewer.api.static_assets import install_static_routes
 from plateau_rt.viewer.jobs import JobManager
 from plateau_rt.viewer.settings import ViewerSettings
@@ -55,6 +56,7 @@ def create_app(settings: ViewerSettings, *, static_dir: Path | None = None) -> F
     app.state.jobs = jobs
     app.state.on_bundle_committed = eager_hook(jobs)
     install_error_handlers(app)
+    install_security(app, settings)
     app.include_router(bundles_router, prefix="/api")
     app.include_router(derived_router, prefix="/api")
     app.include_router(jobs_router, prefix="/api")

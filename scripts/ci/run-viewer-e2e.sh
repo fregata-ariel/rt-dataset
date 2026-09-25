@@ -2,7 +2,8 @@
 # viewer のブラウザ smoke test (V0-8 #43): 合成 bundle を Playwright (Chromium) でアップロードし、
 # panel を開いて console error がないことなどを確かめる。
 #   1. fixture の作成 (ci サービスで tests/viewer_bundle_fixtures.py): 正常な bundle (v3 / v2)、
-#      壊れた manifest の bundle、危険なアーカイブを ci-reports/viewer-e2e/fixtures/ に置く
+#      壊れた manifest の bundle (bad_schema_version / script_in_message)、危険なアーカイブ、
+#      および XSS 名を持つ bundle_xss.zip を ci-reports/viewer-e2e/fixtures/ に置く
 #   2. viewer サービスの起動 (独自 compose プロジェクト、空いている port、一時的な store、--wait)
 #   3. viewer-e2e コンテナで pytest tests/e2e (viewer のネットワーク名前空間を共有し VIEWER_URL で接続)
 #   失敗時は Playwright の trace / スクリーンショット (ci-reports/viewer-e2e/test-results/) と
@@ -56,17 +57,28 @@ docker compose --profile ci run --rm ci bash -euc '
   python tests/viewer_bundle_fixtures.py "$out" --archive zip
   python tests/viewer_bundle_fixtures.py "$out" --archive zip --schema 2
   python tests/viewer_bundle_fixtures.py "$out" --archive zip --broken bad_schema_version
+  python tests/viewer_bundle_fixtures.py "$out" --archive zip --broken script_in_message
   python tests/viewer_bundle_fixtures.py "$out" --malicious dotdot
   python -c "$2" "$out/expected.json"
 ' _ "${FIXTURE_DIR}" '
-import json, sys
+import json, os, shutil, sys, zipfile
 sys.path.insert(0, "tests")
 import viewer_bundle_fixtures as f
+out = os.path.dirname(os.path.abspath(sys.argv[1]))
+src = os.path.join(out, "bundle.zip")
+xss = os.path.join(out, "bundle_xss.zip")
+shutil.copyfile(src, xss)
+with zipfile.ZipFile(xss, "a") as archive:
+    archive.writestr("bundle/NOTES.txt", "xss fixture copy\n")
 expected = {
     "broken_case": "bad_schema_version",
     "broken_message": f.BROKEN_CASE_MESSAGES["bad_schema_version"],
     "malicious_case": "dotdot",
     "malicious_member": f.MALICIOUS_MEMBER_NAMES["dotdot"],
+    "xss_bundle": "bundle_xss.zip",
+    "xss_bundle_name": f.XSS_BUNDLE_NAME,
+    "xss_broken_case": "script_in_message",
+    "xss_broken_message": f.BROKEN_CASE_MESSAGES["script_in_message"],
 }
 with open(sys.argv[1], "w") as handle:
     json.dump(expected, handle, indent=2)
